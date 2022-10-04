@@ -1,3 +1,3 @@
 # container-ci-hotplug
 
-Run a Docker container and hot-plug devices into it as they are plugged and unplugged.
+Hot-plug devices into a Docker container as they are plugged and unplugged.

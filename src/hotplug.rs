@@ -4,11 +4,13 @@ use crate::udev_device_ext::DevNum;
 
 use anyhow::{anyhow, bail, Error, Result};
 
-use std::borrow::{BorrowMut, Cow};
+use std::borrow::BorrowMut;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::path::PathBuf;
 
+use tokio::signal::ctrl_c;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::spawn;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -18,13 +20,14 @@ use tokio_util::task::LocalPoolHandle;
 use tokio_udev::{AsyncMonitorSocket, Device, Enumerator, EventType};
 
 #[derive(Debug)]
-enum HotPlugEvent {
+enum Event {
+    Signal(SignalKind),
     ContainerStop(i64),
     UdevAdd((u64, u64), PathBuf, Option<PathBuf>),
     UdevRemove((u64, u64)),
 }
 
-impl HotPlugEvent {
+impl Event {
     pub fn from_udev<D, F>(event_type: EventType, device: D, symlink_fn: &mut F) -> Option<Self>
     where
         D: Deref<Target = Device>,
@@ -41,9 +44,14 @@ impl HotPlugEvent {
     }
 }
 
+pub enum HotPlugEvent {
+    Add((u64, u64), Vec<PathBuf>),
+    Remove((u64, u64), Vec<PathBuf>),
+}
+
 fn udev_task<F>(
     root_path: PathBuf,
-    tx: UnboundedSender<HotPlugEvent>,
+    tx: UnboundedSender<Event>,
     symlink_fn: F,
 ) -> JoinHandle<Result<()>>
 where
@@ -58,7 +66,7 @@ where
                 .filter_map(|event| event.ok())
                 .filter(|event| event.syspath().starts_with(&root_path))
                 .filter_map(move |event| {
-                    HotPlugEvent::from_udev(event.event_type(), event, symlink_fn.borrow_mut())
+                    Event::from_udev(event.event_type(), event, symlink_fn.borrow_mut())
                 })
         };
 
@@ -69,7 +77,7 @@ where
                 .scan_devices()?
                 .filter(|device| device.syspath().starts_with(&root_path))
                 .filter_map(move |device| {
-                    HotPlugEvent::from_udev(EventType::Add, &device, symlink_fn.borrow_mut())
+                    Event::from_udev(EventType::Add, &device, symlink_fn.borrow_mut())
                 })
         };
 
@@ -86,54 +94,83 @@ where
 
 fn stop_task(
     container: Container,
-    tx: tokio::sync::mpsc::UnboundedSender<HotPlugEvent>,
+    tx: tokio::sync::mpsc::UnboundedSender<Event>,
 ) -> JoinHandle<Result<()>> {
     spawn(async move {
         let status = container.wait().await?;
-        tx.send(HotPlugEvent::ContainerStop(status))?;
+        tx.send(Event::ContainerStop(status))?;
         Ok::<(), Error>(())
     })
 }
 
-pub fn hotplug<F>(
+fn ctrl_c_task(tx: tokio::sync::mpsc::UnboundedSender<Event>) -> JoinHandle<Result<()>> {
+    spawn(async move {
+        while let Ok(_) = ctrl_c().await {
+            tx.send(Event::Signal(SignalKind::interrupt()))?;
+        }
+        Err::<(), Error>(anyhow!("Failed to listen for ctrl+c signal"))
+    })
+}
+
+fn sighup_task(tx: tokio::sync::mpsc::UnboundedSender<Event>) -> JoinHandle<Result<()>> {
+    spawn(async move {
+        let mut stream = signal(SignalKind::hangup())?;
+        while let Some(_) = stream.recv().await {
+            tx.send(Event::Signal(SignalKind::hangup()))?;
+        }
+        Err::<(), Error>(anyhow!("Failed to listen for sighup signal"))
+    })
+}
+
+pub fn hotplug<F, L>(
     container: Container,
     root_path: PathBuf,
     symlink_fn: F,
+    log_fn: L,
 ) -> JoinHandle<Result<i64, Error>>
 where
     F: Send + Clone + Fn(&Device) -> Option<PathBuf> + 'static,
+    L: Send + Clone + Fn(HotPlugEvent) -> () + 'static,
 {
-    let (tx, mut rx) = unbounded_channel::<HotPlugEvent>();
+    let (tx, mut rx) = unbounded_channel::<Event>();
     spawn(async move {
         let _udev_guard = udev_task(root_path, tx.clone(), symlink_fn).guard();
         let _stop_guard = stop_task(container.clone(), tx.clone()).guard();
+        let _ctrl_c_guard = ctrl_c_task(tx.clone()).guard();
+        let _sighup_guard = sighup_task(tx.clone()).guard();
 
         let mut devices = HashMap::<(u64, u64), HashSet<PathBuf>>::default();
 
         while let Some(event) = rx.recv().await {
             match event {
-                HotPlugEvent::ContainerStop(status) => {
+                Event::Signal(_) => {
+                    container.clone().remove(true).await?;
+                }
+                Event::ContainerStop(status) => {
                     return Ok(status);
                 }
-                HotPlugEvent::UdevAdd(devnum, devnode, symlink) => {
+                Event::UdevAdd(devnum, devnode, symlink) => {
                     let nodes = devices.entry(devnum).or_default();
                     container.device(devnum, (true, true, true)).await?;
                     nodes.insert(devnode.clone());
                     container.mknod(&devnode, devnum).await?;
-                    println!("Attaching {:?}", devnode);
                     if let Some(symlink) = symlink {
                         nodes.insert(symlink.clone());
                         container.symlink(&devnode, &symlink).await?;
-                        println!("Attaching {:?}", symlink);
                     }
+                    log_fn(HotPlugEvent::Add(devnum, nodes.iter().cloned().collect()))
                 }
-                HotPlugEvent::UdevRemove(devnum) => {
+                Event::UdevRemove(devnum) => {
                     let nodes = devices.entry(devnum).or_default();
                     container.device(devnum, (false, false, false)).await?;
-                    for node in nodes.drain() {
+                    for node in nodes.iter() {
                         container.rm(&node).await?;
-                        println!("Dettaching {:?}", node);
                     }
+                    log_fn(HotPlugEvent::Remove(
+                        devnum,
+                        nodes.iter().cloned().collect(),
+                    ));
+                    nodes.clear();
                 }
             }
         }
@@ -142,38 +179,48 @@ where
 }
 
 pub trait HotPlug {
-    fn hotplug<S, P, L>(&self, hub: &Device, symlinks: L) -> JoinHandle<Result<i64, Error>>
+    fn hotplug<S, P, L, C>(
+        &self,
+        hub: &Device,
+        symlinks: L,
+        log_fn: C,
+    ) -> JoinHandle<Result<i64, Error>>
     where
         S: Into<String>,
         P: Into<PathBuf>,
-        L: IntoIterator<Item = ((S, S, S), P)>;
+        L: IntoIterator<Item = (S, P)>,
+        C: Send + Clone + Fn(HotPlugEvent) -> () + 'static;
 }
 
 impl HotPlug for Container {
-    fn hotplug<S, P, L>(&self, hub: &Device, symlinks: L) -> JoinHandle<Result<i64, Error>>
+    fn hotplug<S, P, L, C>(
+        &self,
+        hub: &Device,
+        symlinks: L,
+        log_fn: C,
+    ) -> JoinHandle<Result<i64, Error>>
     where
         S: Into<String>,
         P: Into<PathBuf>,
-        L: IntoIterator<Item = ((S, S, S), P)>,
+        L: IntoIterator<Item = (S, P)>,
+        C: Send + Clone + Fn(HotPlugEvent) -> () + 'static,
     {
-        let link_map: HashMap<(Cow<str>, Cow<str>, Cow<str>), PathBuf> = symlinks
+        let link_map: HashMap<String, PathBuf> = symlinks
             .into_iter()
-            .map(|((v, p, i), s)| {
-                (
-                    (v.into().into(), p.into().into(), i.into().into()),
-                    s.into(),
-                )
-            })
+            .map(|(dev, path)| (dev.into(), path.into()))
             .collect();
 
-        hotplug(self.clone(), hub.syspath().to_owned(), move |device| {
-            let vid = device.property_value("ID_VENDOR_ID")?.to_str()?.into();
-            let pid = device.property_value("ID_MODEL_ID")?.to_str()?.into();
-            let interface = device
-                .property_value("ID_USB_INTERFACE_NUM")?
-                .to_str()?
-                .into();
-            link_map.get(&(vid, pid, interface)).cloned()
-        })
+        hotplug(
+            self.clone(),
+            hub.syspath().to_owned(),
+            move |device| {
+                let vid = device.property_value("ID_VENDOR_ID")?.to_str()?;
+                let pid = device.property_value("ID_MODEL_ID")?.to_str()?;
+                let interface = device.property_value("ID_USB_INTERFACE_NUM")?.to_str()?;
+                let key = format!("usb:{vid}:{pid}:{interface}");
+                link_map.get(&key).cloned()
+            },
+            log_fn,
+        )
     }
 }

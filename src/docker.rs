@@ -1,6 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 
 use tokio::io::AsyncWriteExt;
+use tokio::spawn;
+use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
 use bollard::errors::Error;
@@ -20,17 +22,6 @@ pub struct IoStream {
     pub input: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>,
 }
 
-pub struct ContainerBuilder {
-    docker: bollard::Docker,
-    image: String,
-    name: Option<String>,
-    binds: Option<Vec<String>>,
-    restart_policy: Option<RestartPolicy>,
-    cmd: Option<Vec<String>>,
-    auto_remove: Option<bool>,
-    remove_old: bool,
-}
-
 impl Docker {
     pub fn connect_with_defaults() -> Result<Docker> {
         Ok(Docker(bollard::Docker::connect_with_local_defaults()?))
@@ -44,100 +35,27 @@ impl Docker {
         ))
     }
 
-    pub fn with_image<T: Into<String>>(&self, image: T) -> ContainerBuilder {
-        ContainerBuilder {
-            docker: self.0.clone(),
-            image: image.into(),
-            name: None,
-            binds: None,
-            restart_policy: None,
-            cmd: None,
-            auto_remove: None,
-            remove_old: false,
-        }
-    }
-}
+    pub async fn run<U: AsRef<str>, T: AsRef<[U]>>(&self, args: T) -> Result<Container> {
+        let args = args.as_ref().iter().map(|arg| arg.as_ref());
+        let args = ["run", "-d", "--rm", "--restart=no"]
+            .into_iter()
+            .chain(args);
 
-impl ContainerBuilder {
-    pub fn name<T: AsRef<str>>(&mut self, name: T) -> &mut Self {
-        self.name = Some(name.as_ref().into());
-        self
-    }
+        let output = tokio::process::Command::new("docker")
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .spawn()?
+            .wait_with_output()
+            .await?;
 
-    pub fn bind<U: AsRef<str>, T: AsRef<[U]>>(&mut self, binds: T) -> &mut Self {
-        let iter = binds.as_ref().iter().map(|s| s.as_ref().into());
-        match &mut self.binds {
-            Some(binds) => binds.extend(iter),
-            None => self.binds = Some(iter.collect()),
-        };
-        self
-    }
+        ensure!(
+            output.status.success(),
+            "Failed to create container: {}",
+            String::from_utf8_lossy(output.stderr.as_slice())
+        );
 
-    pub fn restart_policy<T: Into<RestartPolicy>>(&mut self, restart_policy: T) -> &mut Self {
-        self.restart_policy = Some(restart_policy.into());
-        self
-    }
-
-    pub fn cmd<U: AsRef<str>, T: AsRef<[U]>>(&mut self, devices: T) -> &mut Self {
-        let iter = devices.as_ref().iter().map(|s| s.as_ref().into());
-        self.cmd = Some(iter.collect());
-        self
-    }
-
-    pub fn bash<T: AsRef<str>>(&mut self, cmd: T) -> &mut Self {
-        self.cmd(["/bin/bash", "-c", cmd.as_ref()])
-    }
-
-    pub fn auto_remove(&mut self, auto_remove: bool) -> &mut Self {
-        self.auto_remove = Some(auto_remove);
-        self
-    }
-
-    pub fn remove_old(&mut self, remove_old: bool) -> &mut Self {
-        self.remove_old = remove_old;
-        self
-    }
-
-    pub async fn create(&self) -> Result<Container> {
-        let mut options = None;
-        let mut config: bollard::container::Config<String> = Default::default();
-        let mut host_config: bollard::models::HostConfig = Default::default();
-
-        config.image = Some(self.image.clone());
-        config.cmd = self.cmd.clone();
-        config.tty = Some(true);
-
-        if let Some(name) = &self.name {
-            options = Some(bollard::container::CreateContainerOptions { name });
-
-            if self.remove_old {
-                let docker = Docker(self.docker.clone());
-                if let Some(container) = docker.get_container(&name).await.ok() {
-                    container.remove(true).await?;
-                }
-            }
-        }
-
-        host_config.binds = self.binds.clone();
-        host_config.auto_remove = self.auto_remove.clone();
-
-        if let Some(restart_policy) = self.restart_policy {
-            host_config.restart_policy = Some(bollard::models::RestartPolicy {
-                name: Some(restart_policy),
-                ..Default::default()
-            });
-        }
-
-        Some(bollard::models::RestartPolicy {
-            name: Some(bollard::models::RestartPolicyNameEnum::NO),
-            ..Default::default()
-        });
-
-        config.host_config = Some(host_config);
-
-        let response = self.docker.create_container(options, config).await?;
-
-        Ok(Container(response.id, self.docker.clone()))
+        let id = String::from_utf8(output.stdout)?;
+        self.get_container(id.trim()).await
     }
 }
 
@@ -184,10 +102,6 @@ impl Container {
         }
 
         unreachable!();
-    }
-
-    pub async fn bash<T: AsRef<str>>(&self, cmd: T) -> Result<IoStream> {
-        self.exec(["/bin/bash", "-c", cmd.as_ref()]).await
     }
 
     pub async fn attach(&self) -> Result<IoStream> {
@@ -248,7 +162,7 @@ impl Container {
     }
 
     pub async fn mkdir<T: AsRef<std::path::Path>>(&self, path: T) -> Result<()> {
-        self.exec(["/usr/bin/mkdir", "-p", &path.as_ref().to_string_lossy()])
+        self.exec(["mkdir", "-p", &path.as_ref().to_string_lossy()])
             .await?
             .collect()
             .await?;
@@ -270,7 +184,7 @@ impl Container {
         self.rm(&node).await?;
         self.mkdir_for(&node).await?;
         self.exec([
-            "/usr/bin/mknod",
+            "mknod",
             &node.as_ref().to_string_lossy(),
             "c",
             &major.to_string(),
@@ -290,7 +204,7 @@ impl Container {
         self.rm(&link).await?;
         self.mkdir_for(&link).await?;
         self.exec([
-            "/usr/bin/ln",
+            "ln",
             "-s",
             &source.as_ref().to_string_lossy(),
             &link.as_ref().to_string_lossy(),
@@ -302,7 +216,7 @@ impl Container {
     }
 
     pub async fn rm<T: AsRef<std::path::Path>>(&self, node: T) -> Result<()> {
-        self.exec(["/usr/bin/rm", "-f", &node.as_ref().to_string_lossy()])
+        self.exec(["rm", "-f", &node.as_ref().to_string_lossy()])
             .await?
             .collect()
             .await?;
@@ -362,7 +276,7 @@ async fn deny_device_cgroup1(
 }
 
 impl IoStream {
-    pub async fn collect(&mut self) -> Result<String> {
+    pub async fn collect(mut self) -> Result<String> {
         let mut result = String::default();
         while let Some(output) = self.output.next().await {
             result.push_str(&output?.to_string());
@@ -370,25 +284,25 @@ impl IoStream {
         return Ok(result);
     }
 
-    pub async fn pipe_std(&mut self) -> Result<()> {
-        self.pipe(&mut tokio::io::stdout(), &mut tokio::io::stderr())
-            .await?;
-        Ok(())
+    pub fn pipe_std(self) -> JoinHandle<Result<()>> {
+        self.pipe(tokio::io::stdout(), tokio::io::stderr())
     }
 
-    pub async fn pipe<O, E>(&mut self, stdout: &mut O, stderr: &mut E) -> Result<()>
+    pub fn pipe<O, E>(mut self, mut stdout: O, mut stderr: E) -> JoinHandle<Result<()>>
     where
-        O: tokio::io::AsyncWrite + std::marker::Unpin,
-        E: tokio::io::AsyncWrite + std::marker::Unpin,
+        O: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
+        E: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
     {
-        while let Some(output) = self.output.next().await {
-            match output? {
-                LogOutput::Console { message } => stdout.write(message.as_ref()).await?,
-                LogOutput::StdOut { message } => stdout.write(message.as_ref()).await?,
-                LogOutput::StdErr { message } => stderr.write(message.as_ref()).await?,
-                _ => continue,
-            };
-        }
-        return Ok(());
+        spawn(async move {
+            while let Some(output) = self.output.next().await {
+                match output? {
+                    LogOutput::Console { message } => stdout.write(message.as_ref()).await?,
+                    LogOutput::StdOut { message } => stdout.write(message.as_ref()).await?,
+                    LogOutput::StdErr { message } => stderr.write(message.as_ref()).await?,
+                    _ => continue,
+                };
+            }
+            return Ok::<(), anyhow::Error>(());
+        })
     }
 }

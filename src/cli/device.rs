@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{anyhow, bail, ensure, Context, Error, Result};
-use tokio_udev::Enumerator;
+use udev::Enumerator;
 
 #[derive(Clone)]
 pub struct Device(usize, DeviceType);
@@ -134,7 +134,7 @@ impl Display for Device {
 }
 
 impl DeviceType {
-    fn device(&self) -> Result<tokio_udev::Device> {
+    fn device(&self) -> Result<udev::Device> {
         let dev = match &self {
             DeviceType::Usb(vid, pid, serial) => {
                 let mut enumerator = Enumerator::new()?;
@@ -152,7 +152,7 @@ impl DeviceType {
                 let path = path
                     .canonicalize()
                     .context(anyhow!("Failed to resolve PATH for `{self}`"))?;
-                tokio_udev::Device::from_syspath(&path)
+                udev::Device::from_syspath(&path)
                     .context(anyhow!("Failed to find device `{self}`"))?
             }
             DeviceType::Devnode(path) => {
@@ -176,7 +176,7 @@ impl Device {
         self.to_string()
     }
 
-    pub fn target(&self) -> Result<tokio_udev::Device> {
+    pub fn target(&self) -> Result<udev::Device> {
         let mut device = self.1.device()?;
         for _ in 0..self.0 {
             device = device.parent().context(anyhow!(

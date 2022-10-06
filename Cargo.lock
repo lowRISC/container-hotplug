@@ -163,10 +163,11 @@ dependencies = [
  "env_logger",
  "futures-core",
  "log",
+ "nix",
  "tokio",
  "tokio-stream",
- "tokio-udev",
  "tokio-util",
+ "udev",
 ]
 
 [[package]]
@@ -534,16 +535,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
 
 [[package]]
-name = "mio"
-version = "0.7.14"
+name = "memoffset"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8067b404fe97c70829f082dec8bcf4f71225d7eaea1d8645349cb76fa06205cc"
+checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
 dependencies = [
- "libc",
- "log",
- "miow",
- "ntapi",
- "winapi",
+ "autocfg",
 ]
 
 [[package]]
@@ -559,21 +556,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "miow"
-version = "0.3.7"
+name = "nix"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9f1c5b025cda876f66ef43a113f91ebc9f4ccef34843000e0adf6ebbab84e21"
+checksum = "e322c04a9e3440c327fca7b6c8a63e6890a32fa2ad689db972425f07e0d22abb"
 dependencies = [
- "winapi",
-]
-
-[[package]]
-name = "ntapi"
-version = "0.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c28774a7fd2fbb4f0babd8237ce554b73af68021b5f695a3cebd6c59bac0980f"
-dependencies = [
- "winapi",
+ "autocfg",
+ "bitflags",
+ "cfg-if",
+ "libc",
+ "memoffset",
+ "pin-utils",
 ]
 
 [[package]]
@@ -939,7 +932,7 @@ dependencies = [
  "bytes",
  "libc",
  "memchr",
- "mio 0.8.4",
+ "mio",
  "num_cpus",
  "once_cell",
  "parking_lot",
@@ -970,18 +963,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "tokio-udev"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "246ffebae60acd93eb0056bac967cad807c7aa09916fabceac50479ad1f53e64"
-dependencies = [
- "futures-core",
- "mio 0.7.14",
- "tokio",
- "udev",
 ]
 
 [[package]]
@@ -1042,7 +1023,6 @@ checksum = "1c960764f7e816eed851a96c364745d37f9fe71a2e7dba79fbd40104530b5dd0"
 dependencies = [
  "libc",
  "libudev-sys",
- "mio 0.8.4",
  "pkg-config",
 ]
 

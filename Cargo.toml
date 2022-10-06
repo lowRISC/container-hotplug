@@ -10,9 +10,10 @@ anyhow = "1.0"
 log = "0.4"
 env_logger = "0.9"
 clap = { version = "4.0", features = ["default", "derive", "unicode", "wrap_help"] }
+nix = { version = "0.25", features = ["poll"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["full"] }
 futures-core = "0.3"
-tokio-udev = "0.8"
+udev = "0.6"
 bollard = "0.13"

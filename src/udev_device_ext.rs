@@ -1,4 +1,4 @@
-use tokio_udev::Device;
+use udev::Device;
 
 pub trait DevNum {
     fn device_number(&self) -> Option<(u64, u64)>;

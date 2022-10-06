@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Error, Result};
 use std::borrow::BorrowMut;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
+use std::os::unix::prelude::AsRawFd;
 use std::path::PathBuf;
 
 use tokio::signal::ctrl_c;
@@ -14,10 +15,8 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::spawn;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::task::JoinHandle;
-use tokio_stream::StreamExt;
-use tokio_util::task::LocalPoolHandle;
 
-use tokio_udev::{AsyncMonitorSocket, Device, Enumerator, EventType};
+use udev::{Device, Enumerator, EventType};
 
 #[derive(Debug)]
 enum Event {
@@ -37,7 +36,7 @@ impl Event {
         let devnode = device.devnode()?.to_owned();
         let symlink = symlink_fn(device.deref());
         match event_type {
-            EventType::Add | EventType::Change => Some(Self::UdevAdd(devnum, devnode, symlink)),
+            EventType::Add => Some(Self::UdevAdd(devnum, devnode, symlink)),
             EventType::Remove => Some(Self::UdevRemove(devnum)),
             _ => None,
         }
@@ -49,21 +48,17 @@ pub enum HotPlugEvent {
     Remove((u64, u64), Vec<PathBuf>),
 }
 
-fn udev_task<F>(
-    root_path: PathBuf,
-    tx: UnboundedSender<Event>,
-    symlink_fn: F,
-) -> JoinHandle<Result<()>>
+fn udev_task<F>(root_path: PathBuf, tx: UnboundedSender<Event>, symlink_fn: F) -> ()
 where
     F: Send + Clone + Fn(&Device) -> Option<PathBuf> + 'static,
 {
-    const POOL_SIZE: usize = 1;
-    LocalPoolHandle::new(POOL_SIZE).spawn_pinned(move || async move {
-        let listener = tokio_udev::MonitorBuilder::new()?.listen()?;
-        let listener = {
+    std::thread::spawn(move || -> Result<(), anyhow::Error> {
+        let socket = udev::MonitorBuilder::new()?.listen()?;
+        let poll_fd = nix::poll::PollFd::new(socket.as_raw_fd(), nix::poll::PollFlags::POLLIN);
+
+        let mut listener = {
             let mut symlink_fn = symlink_fn.clone();
-            AsyncMonitorSocket::new(listener)?
-                .filter_map(|event| event.ok())
+            socket
                 .filter(|event| event.syspath().starts_with(&root_path))
                 .filter_map(move |event| {
                     Event::from_udev(event.event_type(), event, symlink_fn.borrow_mut())
@@ -81,15 +76,17 @@ where
                 })
         };
 
-        let existing = tokio_stream::iter(existing);
-
-        let mut events = existing.chain(listener);
-        while let Some(event) = events.next().await {
+        for event in existing {
             tx.send(event)?;
         }
 
-        Err::<(), Error>(anyhow!("Failed to read udev event"))
-    })
+        loop {
+            while let Some(event) = listener.next() {
+                tx.send(event)?;
+            }
+            nix::poll::poll(&mut [poll_fd], -1)?;
+        }
+    });
 }
 
 fn stop_task(
@@ -134,7 +131,8 @@ where
 {
     let (tx, mut rx) = unbounded_channel::<Event>();
     spawn(async move {
-        let _udev_guard = udev_task(root_path, tx.clone(), symlink_fn).guard();
+        /*let _udev_guard =*/
+        udev_task(root_path, tx.clone(), symlink_fn); //.guard();
         let _stop_guard = stop_task(container.clone(), tx.clone()).guard();
         let _ctrl_c_guard = ctrl_c_task(tx.clone()).guard();
         let _sighup_guard = sighup_task(tx.clone()).guard();
@@ -152,25 +150,27 @@ where
                 Event::UdevAdd(devnum, devnode, symlink) => {
                     let nodes = devices.entry(devnum).or_default();
                     container.device(devnum, (true, true, true)).await?;
-                    nodes.insert(devnode.clone());
-                    container.mknod(&devnode, devnum).await?;
+                    if nodes.insert(devnode.clone()) {
+                        container.mknod(&devnode, devnum).await?;
+                    }
                     if let Some(symlink) = symlink {
-                        nodes.insert(symlink.clone());
-                        container.symlink(&devnode, &symlink).await?;
+                        if nodes.insert(symlink.clone()) {
+                            container.symlink(&devnode, &symlink).await?;
+                        }
                     }
                     log_fn(HotPlugEvent::Add(devnum, nodes.iter().cloned().collect()))
                 }
                 Event::UdevRemove(devnum) => {
-                    let nodes = devices.entry(devnum).or_default();
-                    container.device(devnum, (false, false, false)).await?;
-                    for node in nodes.iter() {
-                        container.rm(&node).await?;
+                    if let Some(nodes) = devices.remove(&devnum) {
+                        container.device(devnum, (false, false, false)).await?;
+                        for node in nodes.iter() {
+                            container.rm(&node).await?;
+                        }
+                        log_fn(HotPlugEvent::Remove(
+                            devnum,
+                            nodes.iter().cloned().collect(),
+                        ));
                     }
-                    log_fn(HotPlugEvent::Remove(
-                        devnum,
-                        nodes.iter().cloned().collect(),
-                    ));
-                    nodes.clear();
                 }
             }
         }

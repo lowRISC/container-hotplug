@@ -10,7 +10,7 @@ pub struct Device(usize, DeviceType);
 
 #[derive(Clone)]
 pub enum DeviceType {
-    Usb(String, String, Option<String>),
+    Usb(String, Option<String>, Option<String>),
     Syspath(PathBuf),
     Devnode(PathBuf),
 }
@@ -48,14 +48,14 @@ impl FromStr for Device {
         let device = match prefix {
             "usb" => {
                 ensure!(
-                    parts.len() == 2 || parts.len() == 3,
-                    "Device format for usb should be `<VID>:<PID>[:<SERIAL>]`, found `{dev}`."
+                    parts.len() >= 1 && parts.len() <= 3,
+                    "Device format for usb should be `<VID>[:<PID>[:<SERIAL>]]`, found `{dev}`."
                 );
 
                 let mut parts = parts.iter().copied();
 
                 let vid = parts.next().unwrap();
-                let pid = parts.next().unwrap();
+                let pid = parts.next();
                 let serial = parts.next();
 
                 ensure!(
@@ -63,17 +63,18 @@ impl FromStr for Device {
                     "USB device VID should be a 4 digit hex number, found `{vid}`"
                 );
                 ensure!(
-                    is_hex4(pid),
-                    "USB device PID should be a 4 digit hex number, found `{pid}`"
+                    pid.is_none() || is_hex4(pid.unwrap()),
+                    "USB device PID should be a 4 digit hex number, found `{}`",
+                    pid.unwrap()
                 );
                 ensure!(
                     serial.is_none() || is_alphanum(serial.unwrap()),
-                    "USB device SERIAL should be a number, found `{}`",
+                    "USB device SERIAL should be alphanumeric, found `{}`",
                     serial.unwrap()
                 );
 
                 let vid = vid.to_ascii_lowercase();
-                let pid = pid.to_ascii_lowercase();
+                let pid = serial.map(|s| s.to_ascii_lowercase());
                 let serial = serial.map(|s| s.to_owned());
 
                 DeviceType::Usb(vid, pid, serial)
@@ -108,11 +109,14 @@ impl FromStr for Device {
 impl Display for DeviceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
-            DeviceType::Usb(vid, pid, Some(serial)) => {
+            DeviceType::Usb(vid, Some(pid), Some(serial)) => {
                 write!(f, "usb:{vid}:{pid}:{serial}")
             }
-            DeviceType::Usb(vid, pid, None) => {
+            DeviceType::Usb(vid, Some(pid), None) => {
                 write!(f, "usb:{vid}:{pid}")
+            }
+            DeviceType::Usb(vid, None, _) => {
+                write!(f, "usb:{vid}")
             }
             DeviceType::Syspath(path) => {
                 write!(f, "syspath:{}", path.display())
@@ -139,7 +143,9 @@ impl DeviceType {
             DeviceType::Usb(vid, pid, serial) => {
                 let mut enumerator = Enumerator::new()?;
                 enumerator.match_attribute("idVendor", vid)?;
-                enumerator.match_attribute("idProduct", pid)?;
+                if let Some(pid) = pid {
+                    enumerator.match_attribute("idProduct", pid)?;
+                }
                 if let Some(serial) = serial {
                     enumerator.match_attribute("serial", serial)?;
                 }

@@ -1,9 +1,13 @@
 use anyhow::{ensure, Context, Result};
 
+use std::ops::DerefMut;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::spawn;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
+
+use raw_tty::GuardMode;
 
 use bollard::errors::Error;
 
@@ -286,16 +290,23 @@ impl IoStream {
         return Ok(result);
     }
 
-    pub fn pipe_std(self) -> JoinHandle<Result<()>> {
-        let stdin = tokio_fd::AsyncFd::try_from(libc::STDIN_FILENO).unwrap();
-        let stdout = tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO).unwrap();
-        let stderr = tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO).unwrap();
-        self.pipe(stdin, stdout, stderr)
+    pub fn pipe_std(self) -> Result<JoinHandle<Result<()>>> {
+        let mut stdin = tokio_fd::AsyncFd::try_from(libc::STDIN_FILENO)?.guard_mode()?;
+        stdin.set_raw_mode()?;
+        let stdout = tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO)?;
+        let stderr = tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO)?;
+        Ok(self.pipe(stdin, stdout, stderr))
     }
 
-    pub fn pipe<I, O, E>(self, mut stdin: I, mut stdout: O, mut stderr: E) -> JoinHandle<Result<()>>
+    pub fn pipe<I, II, O, E>(
+        self,
+        mut stdin: II,
+        mut stdout: O,
+        mut stderr: E,
+    ) -> JoinHandle<Result<()>>
     where
         I: tokio::io::AsyncRead + std::marker::Unpin + Send + 'static,
+        II: DerefMut<Target = I> + std::marker::Unpin + Send + 'static,
         O: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
         E: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
     {

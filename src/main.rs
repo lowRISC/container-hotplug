@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
             let get_container = || async move {
                 let docker = Docker::connect_with_defaults()?;
                 let container = docker.run(docker_args).await?;
-                container.attach().await?.pipe_std();
+                container.attach().await?.pipe_std()?;
                 Ok(container)
             };
 

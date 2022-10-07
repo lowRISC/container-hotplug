@@ -1,6 +1,6 @@
 use anyhow::{ensure, Context, Result};
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::spawn;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
@@ -9,6 +9,8 @@ use bollard::errors::Error;
 
 pub use bollard::container::LogOutput;
 pub use bollard::models::RestartPolicyNameEnum as RestartPolicy;
+
+use crate::tokio_ext::WithJoinHandleGuard;
 
 pub struct Docker(bollard::Docker);
 
@@ -257,8 +259,8 @@ async fn allow_device_cgroup1(
 ) -> Result<()> {
     let path = format!("/sys/fs/cgroup/devices/docker/{container_id}/devices.allow");
     let mut file = tokio::fs::OpenOptions::new().write(true).open(path).await?;
-    file.write(format!("c {major}:{minor} {permissions}").as_bytes())
-        .await?;
+    let mut data = bytes::Bytes::from(format!("c {major}:{minor} {permissions}"));
+    file.write_all_buf(&mut data).await?;
     Ok(())
 }
 
@@ -270,8 +272,8 @@ async fn deny_device_cgroup1(
 ) -> Result<()> {
     let path = format!("/sys/fs/cgroup/devices/docker/{container_id}/devices.deny");
     let mut file = tokio::fs::OpenOptions::new().write(true).open(path).await?;
-    file.write(format!("c {major}:{minor} {permissions}").as_bytes())
-        .await?;
+    let mut data = bytes::Bytes::from(format!("c {major}:{minor} {permissions}"));
+    file.write_all_buf(&mut data).await?;
     Ok(())
 }
 
@@ -285,23 +287,42 @@ impl IoStream {
     }
 
     pub fn pipe_std(self) -> JoinHandle<Result<()>> {
-        self.pipe(tokio::io::stdout(), tokio::io::stderr())
+        let stdin = tokio_fd::AsyncFd::try_from(libc::STDIN_FILENO).unwrap();
+        let stdout = tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO).unwrap();
+        let stderr = tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO).unwrap();
+        self.pipe(stdin, stdout, stderr)
     }
 
-    pub fn pipe<O, E>(mut self, mut stdout: O, mut stderr: E) -> JoinHandle<Result<()>>
+    pub fn pipe<I, O, E>(self, mut stdin: I, mut stdout: O, mut stderr: E) -> JoinHandle<Result<()>>
     where
+        I: tokio::io::AsyncRead + std::marker::Unpin + Send + 'static,
         O: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
         E: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
     {
+        let mut input = self.input;
+        let mut output = self.output;
+
         spawn(async move {
-            while let Some(output) = self.output.next().await {
+            let _stdin_guarg = spawn(async move {
+                let mut buf = bytes::BytesMut::with_capacity(1024);
+                while let Ok(_) = stdin.read_buf(&mut buf).await {
+                    input.write_all_buf(&mut buf).await?;
+                }
+                return Ok::<(), anyhow::Error>(());
+            })
+            .guard();
+
+            while let Some(output) = output.next().await {
                 match output? {
-                    LogOutput::Console { message } => stdout.write(message.as_ref()).await?,
-                    LogOutput::StdOut { message } => stdout.write(message.as_ref()).await?,
-                    LogOutput::StdErr { message } => stderr.write(message.as_ref()).await?,
+                    LogOutput::Console { mut message } => {
+                        stdout.write_all_buf(&mut message).await?
+                    }
+                    LogOutput::StdOut { mut message } => stdout.write_all_buf(&mut message).await?,
+                    LogOutput::StdErr { mut message } => stderr.write_all_buf(&mut message).await?,
                     _ => continue,
                 };
             }
+
             return Ok::<(), anyhow::Error>(());
         })
     }

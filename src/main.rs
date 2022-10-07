@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
                 Ok(container)
             };
 
-            run_ci_container(&root_device, symlink, get_container).await
+            run_ci_container(&root_device, symlink, get_container).await?;
         }
         Action::Attach {
             container_id,
@@ -120,7 +120,9 @@ async fn main() -> Result<()> {
                     .await
             };
 
-            run_ci_container(&root_device, symlink, get_container).await
+            run_ci_container(&root_device, symlink, get_container).await?;
         }
-    }
+    };
+
+    Ok(())
 }

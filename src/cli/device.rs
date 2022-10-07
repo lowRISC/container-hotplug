@@ -74,7 +74,7 @@ impl FromStr for Device {
                 );
 
                 let vid = vid.to_ascii_lowercase();
-                let pid = serial.map(|s| s.to_ascii_lowercase());
+                let pid = pid.map(|s| s.to_ascii_lowercase());
                 let serial = serial.map(|s| s.to_owned());
 
                 DeviceType::Usb(vid, pid, serial)

@@ -7,14 +7,14 @@ use anyhow::{anyhow, bail, Error, Result};
 use std::borrow::BorrowMut;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
-use std::os::unix::prelude::AsRawFd;
 use std::path::PathBuf;
 
 use tokio::signal::ctrl_c;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::spawn;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
-use tokio::task::JoinHandle;
+use tokio::task::{spawn_local, JoinHandle};
+use tokio_stream::StreamExt;
 
 use udev::{Device, Enumerator, EventType};
 
@@ -48,17 +48,43 @@ pub enum HotPlugEvent {
     Remove((u64, u64), Vec<PathBuf>),
 }
 
-fn udev_task<F>(root_path: PathBuf, tx: UnboundedSender<Event>, symlink_fn: F) -> ()
+fn udev_monitor(tx: UnboundedSender<udev::Event>) -> JoinHandle<Result<()>> {
+    spawn_local(async move {
+        let socket = udev::MonitorBuilder::new()?.listen()?;
+        let mut async_fd = tokio::io::unix::AsyncFd::new(socket)?;
+        loop {
+            let mut guard = async_fd.readable_mut().await?;
+            match guard.try_io(|socket| {
+                socket
+                    .get_mut()
+                    .next()
+                    .ok_or(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+            }) {
+                Ok(Ok(result)) => tx
+                    .send(result)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?,
+                Ok(Err(err)) => return Err::<(), anyhow::Error>(err.into()),
+                Err(_would_block) => continue,
+            };
+        }
+    })
+}
+
+fn udev_task<F>(
+    root_path: PathBuf,
+    tx: UnboundedSender<Event>,
+    symlink_fn: F,
+) -> JoinHandle<Result<()>>
 where
     F: Send + Clone + Fn(&Device) -> Option<PathBuf> + 'static,
 {
-    std::thread::spawn(move || -> Result<(), anyhow::Error> {
-        let socket = udev::MonitorBuilder::new()?.listen()?;
-        let poll_fd = nix::poll::PollFd::new(socket.as_raw_fd(), nix::poll::PollFlags::POLLIN);
+    tokio_util::task::LocalPoolHandle::new(1).spawn_pinned(move || async move {
+        let (udev_tx, udev_rx) = unbounded_channel::<udev::Event>();
+        let _guard = udev_monitor(udev_tx).guard();
 
         let mut listener = {
             let mut symlink_fn = symlink_fn.clone();
-            socket
+            tokio_stream::wrappers::UnboundedReceiverStream::new(udev_rx)
                 .filter(|event| event.syspath().starts_with(&root_path))
                 .filter_map(move |event| {
                     Event::from_udev(event.event_type(), event, symlink_fn.borrow_mut())
@@ -81,12 +107,11 @@ where
         }
 
         loop {
-            while let Some(event) = listener.next() {
+            while let Some(event) = listener.next().await {
                 tx.send(event)?;
             }
-            nix::poll::poll(&mut [poll_fd], -1)?;
         }
-    });
+    })
 }
 
 fn stop_task(
@@ -132,7 +157,7 @@ where
     let (tx, mut rx) = unbounded_channel::<Event>();
     spawn(async move {
         /*let _udev_guard =*/
-        udev_task(root_path, tx.clone(), symlink_fn); //.guard();
+        let _udev_guard = udev_task(root_path, tx.clone(), symlink_fn).guard();
         let _stop_guard = stop_task(container.clone(), tx.clone()).guard();
         let _ctrl_c_guard = ctrl_c_task(tx.clone()).guard();
         let _sighup_guard = sighup_task(tx.clone()).guard();

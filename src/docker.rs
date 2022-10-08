@@ -281,6 +281,33 @@ async fn deny_device_cgroup1(
     Ok(())
 }
 
+async fn print_lines<O>(stream: &mut O, data: bytes::Bytes) -> Result<()>
+where
+    O: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
+{
+    let data = std::str::from_utf8(data.as_ref())?;
+    let mut lines = data.lines().peekable();
+
+    let last = if !data.ends_with("\n") {
+        lines.next_back()
+    } else {
+        None
+    };
+
+    for line in lines {
+        let mut buf = bytes::BytesMut::from(line);
+        stream.write_all_buf(&mut buf).await?;
+        buf = bytes::BytesMut::from("\r\n");
+        stream.write_all_buf(&mut buf).await?;
+    }
+    if let Some(line) = last {
+        let mut buf = bytes::BytesMut::from(line);
+        stream.write_all_buf(&mut buf).await?;
+    }
+
+    Ok(())
+}
+
 impl IoStream {
     pub async fn collect(mut self) -> Result<String> {
         let mut result = String::default();
@@ -292,23 +319,27 @@ impl IoStream {
 
     pub fn pipe_std(self) -> Result<JoinHandle<Result<()>>> {
         let mut stdin = tokio_fd::AsyncFd::try_from(libc::STDIN_FILENO)?.guard_mode()?;
+        let mut stdout = tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO)?.guard_mode()?;
+        let mut stderr = tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO)?.guard_mode()?;
         stdin.set_raw_mode()?;
-        let stdout = tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO)?;
-        let stderr = tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO)?;
+        stdout.set_raw_mode()?;
+        stderr.set_raw_mode()?;
         Ok(self.pipe(stdin, stdout, stderr))
     }
 
-    pub fn pipe<I, II, O, E>(
+    pub fn pipe<I, II, O, OO, E, EE>(
         self,
         mut stdin: II,
-        mut stdout: O,
-        mut stderr: E,
+        mut stdout: OO,
+        mut stderr: EE,
     ) -> JoinHandle<Result<()>>
     where
         I: tokio::io::AsyncRead + std::marker::Unpin + Send + 'static,
         II: DerefMut<Target = I> + std::marker::Unpin + Send + 'static,
         O: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
+        OO: DerefMut<Target = O> + std::marker::Unpin + Send + 'static,
         E: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
+        EE: DerefMut<Target = E> + std::marker::Unpin + Send + 'static,
     {
         let mut input = self.input;
         let mut output = self.output;
@@ -325,11 +356,15 @@ impl IoStream {
 
             while let Some(output) = output.next().await {
                 match output? {
-                    LogOutput::Console { mut message } => {
-                        stdout.write_all_buf(&mut message).await?
+                    LogOutput::Console { message } => {
+                        print_lines(stdout.deref_mut(), message).await?;
                     }
-                    LogOutput::StdOut { mut message } => stdout.write_all_buf(&mut message).await?,
-                    LogOutput::StdErr { mut message } => stderr.write_all_buf(&mut message).await?,
+                    LogOutput::StdOut { message } => {
+                        print_lines(stdout.deref_mut(), message).await?;
+                    }
+                    LogOutput::StdErr { message } => {
+                        print_lines(stderr.deref_mut(), message).await?;
+                    }
                     _ => continue,
                 };
             }

@@ -5,6 +5,7 @@ use std::ops::DerefMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::spawn;
 use tokio::task::JoinHandle;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio_stream::StreamExt;
 
 use raw_tty::GuardMode;
@@ -21,11 +22,18 @@ pub struct Docker(bollard::Docker);
 #[derive(Clone)]
 pub struct Container(String, bollard::Docker);
 
+enum IoStreamSource {
+    Container(String),
+    Exec(String),
+}
+
 pub struct IoStream {
     pub output: std::pin::Pin<
         std::boxed::Box<dyn futures_core::stream::Stream<Item = Result<LogOutput, Error>> + Send>,
     >,
     pub input: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>,
+    source: IoStreamSource,
+    docker: bollard::Docker,
 }
 
 impl Docker {
@@ -96,28 +104,40 @@ impl Container {
             ..Default::default()
         };
         let response = self.1.create_exec::<String>(&self.0, options).await?;
+        let id = response.id;
 
         let options = bollard::exec::StartExecOptions {
             detach: false,
             ..Default::default()
         };
-        let response = self.1.start_exec(&response.id, Some(options)).await?;
+        let response = self.1.start_exec(&id, Some(options)).await?;
 
         if let bollard::exec::StartExecResults::Attached { input, output } = response {
-            return Ok(IoStream { output, input });
+            return Ok(IoStream { output, input, source: IoStreamSource::Exec(id), docker: self.1.clone() });
         }
 
         unreachable!();
     }
 
     pub async fn attach(&self) -> Result<IoStream> {
+        /*
+        let output = tokio::process::Command::new("docker")
+            .args([
+                "attach",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .spawn()?
+            .wait_with_output()
+            .await?;
+        */
+
         let options = bollard::container::AttachContainerOptions::<String> {
             stdin: Some(true),
             stdout: Some(true),
             stderr: Some(true),
             stream: Some(true),
             logs: Some(true),
-            detach_keys: Some("ctrl-c".to_string()),
+            ..Default::default()
         };
 
         let response = self.1.attach_container(&self.0, Some(options)).await?;
@@ -125,6 +145,8 @@ impl Container {
         Ok(IoStream {
             output: response.output,
             input: response.input,
+            source: IoStreamSource::Container(self.0.clone()),
+            docker: self.1.clone(),
         })
     }
 
@@ -149,6 +171,14 @@ impl Container {
         let inspect = self.inspect().await?;
         let name = inspect.name.context("Failed to obtain container name")?;
         Ok(name)
+    }
+
+    pub async fn kill(&self, signal: i32) -> Result<()> {
+        let options = bollard::container::KillContainerOptions {
+            signal: format!("{}", signal)
+        };
+        self.1.kill_container(&self.0, Some(options)).await?;
+        Ok(())
     }
 
     pub async fn wait(&self) -> Result<i64> {
@@ -281,30 +311,23 @@ async fn deny_device_cgroup1(
     Ok(())
 }
 
-async fn print_lines<O>(stream: &mut O, data: bytes::Bytes) -> Result<()>
-where
-    O: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
-{
-    let data = std::str::from_utf8(data.as_ref())?;
-    let mut lines = data.lines().peekable();
-
-    let last = if !data.ends_with("\n") {
-        lines.next_back()
-    } else {
-        None
+async fn resize_tty(docker: &bollard::Docker, source: &IoStreamSource, (rows, cols): (u16, u16)) -> Result<()> {
+    match source {
+        IoStreamSource::Container(id) => {
+            let options = bollard::container::ResizeContainerTtyOptions {
+                height: rows,
+                width: cols,
+            };
+            docker.resize_container_tty(&id, options).await?;
+        }
+        IoStreamSource::Exec(id) => {
+            let options = bollard::exec::ResizeExecOptions {
+                height: rows,
+                width: cols,
+            };
+            docker.resize_exec(&id, options).await?;
+        }
     };
-
-    for line in lines {
-        let mut buf = bytes::BytesMut::from(line);
-        stream.write_all_buf(&mut buf).await?;
-        buf = bytes::BytesMut::from("\r\n");
-        stream.write_all_buf(&mut buf).await?;
-    }
-    if let Some(line) = last {
-        let mut buf = bytes::BytesMut::from(line);
-        stream.write_all_buf(&mut buf).await?;
-    }
-
     Ok(())
 }
 
@@ -319,12 +342,26 @@ impl IoStream {
 
     pub fn pipe_std(self) -> Result<JoinHandle<Result<()>>> {
         let mut stdin = tokio_fd::AsyncFd::try_from(libc::STDIN_FILENO)?.guard_mode()?;
-        let mut stdout = tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO)?.guard_mode()?;
-        let mut stderr = tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO)?.guard_mode()?;
-        stdin.set_raw_mode()?;
-        stdout.set_raw_mode()?;
-        stderr.set_raw_mode()?;
-        Ok(self.pipe(stdin, stdout, stderr))
+        let stdout = tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO)?.guard_mode()?;
+        let stderr = tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO)?.guard_mode()?;
+        stdin.modify_mode(|mut t| {
+            use libc::*;
+            t.c_iflag &= !(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
+            t.c_lflag &= !(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+            t.c_cflag &= !(CSIZE | PARENB);
+            t.c_cflag |= CS8;
+            t
+        })?;
+        let resize_stream = async_stream::try_stream! {
+            let mut stream = signal(SignalKind::window_change())?;
+            loop {
+                let size = termsize::get().context("Failed to obtain tty size")?;
+                yield (size.rows, size.cols);
+                stream.recv().await;
+            }
+        };
+
+        Ok(self.pipe(stdin, stdout, stderr, resize_stream))
     }
 
     pub fn pipe<I, II, O, OO, E, EE>(
@@ -332,6 +369,7 @@ impl IoStream {
         mut stdin: II,
         mut stdout: OO,
         mut stderr: EE,
+        resize_stream: impl tokio_stream::Stream<Item = Result<(u16, u16)>> + Send + 'static
     ) -> JoinHandle<Result<()>>
     where
         I: tokio::io::AsyncRead + std::marker::Unpin + Send + 'static,
@@ -343,8 +381,18 @@ impl IoStream {
     {
         let mut input = self.input;
         let mut output = self.output;
+        let docker = self.docker;
+        let source = self.source;
 
         spawn(async move {
+            let _resize_guard = spawn(async move {
+                tokio::pin!(resize_stream);
+                while let Some(size) = resize_stream.next().await {
+                    resize_tty(&docker, &source, size?).await?;
+                }
+                return Ok::<(), anyhow::Error>(());
+            }).guard();
+
             let _stdin_guarg = spawn(async move {
                 let mut buf = bytes::BytesMut::with_capacity(1024);
                 while let Ok(_) = stdin.read_buf(&mut buf).await {
@@ -356,14 +404,14 @@ impl IoStream {
 
             while let Some(output) = output.next().await {
                 match output? {
-                    LogOutput::Console { message } => {
-                        print_lines(stdout.deref_mut(), message).await?;
+                    LogOutput::Console { mut message } => {
+                        stdout.write_all_buf(&mut message).await?;
                     }
-                    LogOutput::StdOut { message } => {
-                        print_lines(stdout.deref_mut(), message).await?;
+                    LogOutput::StdOut { mut message } => {
+                        stdout.write_all_buf(&mut message).await?;
                     }
-                    LogOutput::StdErr { message } => {
-                        print_lines(stderr.deref_mut(), message).await?;
+                    LogOutput::StdErr { mut message } => {
+                        stderr.write_all_buf(&mut message).await?;
                     }
                     _ => continue,
                 };

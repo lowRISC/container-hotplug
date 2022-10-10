@@ -1,77 +1,11 @@
-use anyhow::{ensure, Context, Result};
+use super::{IoStream, IoStreamSource};
 
-use std::ops::DerefMut;
-
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::spawn;
-use tokio::task::JoinHandle;
-use tokio::signal::unix::{signal, SignalKind};
+use anyhow::{Context, Result};
+use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 
-use raw_tty::GuardMode;
-
-use bollard::errors::Error;
-
-pub use bollard::container::LogOutput;
-pub use bollard::models::RestartPolicyNameEnum as RestartPolicy;
-
-use crate::tokio_ext::WithJoinHandleGuard;
-
-pub struct Docker(bollard::Docker);
-
 #[derive(Clone)]
-pub struct Container(String, bollard::Docker);
-
-enum IoStreamSource {
-    Container(String),
-    Exec(String),
-}
-
-pub struct IoStream {
-    pub output: std::pin::Pin<
-        std::boxed::Box<dyn futures_core::stream::Stream<Item = Result<LogOutput, Error>> + Send>,
-    >,
-    pub input: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>,
-    source: IoStreamSource,
-    docker: bollard::Docker,
-}
-
-impl Docker {
-    pub fn connect_with_defaults() -> Result<Docker> {
-        Ok(Docker(bollard::Docker::connect_with_local_defaults()?))
-    }
-
-    pub async fn get_container<T: AsRef<str>>(&self, name: T) -> Result<Container> {
-        let response = self.0.inspect_container(name.as_ref(), None).await?;
-        Ok(Container(
-            response.id.context("Failed to obtain container ID")?,
-            self.0.clone(),
-        ))
-    }
-
-    pub async fn run<U: AsRef<str>, T: AsRef<[U]>>(&self, args: T) -> Result<Container> {
-        let args = args.as_ref().iter().map(|arg| arg.as_ref());
-        let args = ["run", "-d", "--rm", "--restart=no"]
-            .into_iter()
-            .chain(args);
-
-        let output = tokio::process::Command::new("docker")
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .spawn()?
-            .wait_with_output()
-            .await?;
-
-        ensure!(
-            output.status.success(),
-            "Failed to create container: {}",
-            String::from_utf8_lossy(output.stderr.as_slice())
-        );
-
-        let id = String::from_utf8(output.stdout)?;
-        self.get_container(id.trim()).await
-    }
-}
+pub struct Container(pub(super) String, pub(super) bollard::Docker);
 
 impl Container {
     pub fn id(&self) -> &str {
@@ -113,7 +47,12 @@ impl Container {
         let response = self.1.start_exec(&id, Some(options)).await?;
 
         if let bollard::exec::StartExecResults::Attached { input, output } = response {
-            return Ok(IoStream { output, input, source: IoStreamSource::Exec(id), docker: self.1.clone() });
+            return Ok(IoStream {
+                output,
+                input,
+                source: IoStreamSource::Exec(id),
+                docker: self.1.clone(),
+            });
         }
 
         unreachable!();
@@ -175,7 +114,7 @@ impl Container {
 
     pub async fn kill(&self, signal: i32) -> Result<()> {
         let options = bollard::container::KillContainerOptions {
-            signal: format!("{}", signal)
+            signal: format!("{}", signal),
         };
         self.1.kill_container(&self.0, Some(options)).await?;
         Ok(())
@@ -308,115 +247,4 @@ async fn deny_device_cgroup1(
     let mut data = bytes::Bytes::from(format!("c {major}:{minor} {permissions}"));
     file.write_all_buf(&mut data).await?;
     Ok(())
-}
-
-async fn resize_tty(docker: &bollard::Docker, source: &IoStreamSource, (rows, cols): (u16, u16)) -> Result<()> {
-    match source {
-        IoStreamSource::Container(id) => {
-            let options = bollard::container::ResizeContainerTtyOptions {
-                height: rows,
-                width: cols,
-            };
-            docker.resize_container_tty(&id, options).await?;
-        }
-        IoStreamSource::Exec(id) => {
-            let options = bollard::exec::ResizeExecOptions {
-                height: rows,
-                width: cols,
-            };
-            docker.resize_exec(&id, options).await?;
-        }
-    };
-    Ok(())
-}
-
-impl IoStream {
-    pub async fn collect(mut self) -> Result<String> {
-        let mut result = String::default();
-        while let Some(output) = self.output.next().await {
-            result.push_str(&output?.to_string());
-        }
-        return Ok(result);
-    }
-
-    pub fn pipe_std(self) -> Result<JoinHandle<Result<()>>> {
-        let mut stdin = tokio_fd::AsyncFd::try_from(libc::STDIN_FILENO)?.guard_mode()?;
-        let stdout = tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO)?.guard_mode()?;
-        let stderr = tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO)?.guard_mode()?;
-        stdin.modify_mode(|mut t| {
-            use libc::*;
-            t.c_iflag &= !(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
-            t.c_lflag &= !(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-            t.c_cflag &= !(CSIZE | PARENB);
-            t.c_cflag |= CS8;
-            t
-        })?;
-        let resize_stream = async_stream::try_stream! {
-            let mut stream = signal(SignalKind::window_change())?;
-            loop {
-                let size = termsize::get().context("Failed to obtain tty size")?;
-                yield (size.rows, size.cols);
-                stream.recv().await;
-            }
-        };
-
-        Ok(self.pipe(stdin, stdout, stderr, resize_stream))
-    }
-
-    pub fn pipe<I, II, O, OO, E, EE>(
-        self,
-        mut stdin: II,
-        mut stdout: OO,
-        mut stderr: EE,
-        resize_stream: impl tokio_stream::Stream<Item = Result<(u16, u16)>> + Send + 'static
-    ) -> JoinHandle<Result<()>>
-    where
-        I: tokio::io::AsyncRead + std::marker::Unpin + Send + 'static,
-        II: DerefMut<Target = I> + std::marker::Unpin + Send + 'static,
-        O: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
-        OO: DerefMut<Target = O> + std::marker::Unpin + Send + 'static,
-        E: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
-        EE: DerefMut<Target = E> + std::marker::Unpin + Send + 'static,
-    {
-        let mut input = self.input;
-        let mut output = self.output;
-        let docker = self.docker;
-        let source = self.source;
-
-        spawn(async move {
-            let _resize_guard = spawn(async move {
-                tokio::pin!(resize_stream);
-                while let Some(size) = resize_stream.next().await {
-                    resize_tty(&docker, &source, size?).await?;
-                }
-                return Ok::<(), anyhow::Error>(());
-            }).guard();
-
-            let _stdin_guarg = spawn(async move {
-                let mut buf = bytes::BytesMut::with_capacity(1024);
-                while let Ok(_) = stdin.read_buf(&mut buf).await {
-                    input.write_all_buf(&mut buf).await?;
-                }
-                return Ok::<(), anyhow::Error>(());
-            })
-            .guard();
-
-            while let Some(output) = output.next().await {
-                match output? {
-                    LogOutput::Console { mut message } => {
-                        stdout.write_all_buf(&mut message).await?;
-                    }
-                    LogOutput::StdOut { mut message } => {
-                        stdout.write_all_buf(&mut message).await?;
-                    }
-                    LogOutput::StdErr { mut message } => {
-                        stderr.write_all_buf(&mut message).await?;
-                    }
-                    _ => continue,
-                };
-            }
-
-            return Ok::<(), anyhow::Error>(());
-        })
-    }
 }

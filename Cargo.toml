@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0"
+anyhow = { version = "1.0", features = ["backtrace"] }
 log = "0.4"
 env_logger = "0.9"
 clap = { version = "4.0", features = ["default", "derive", "unicode", "wrap_help"] }

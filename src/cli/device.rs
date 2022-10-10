@@ -182,8 +182,13 @@ impl Device {
         self.to_string()
     }
 
-    pub fn target(&self) -> Result<udev::Device> {
-        let mut device = self.1.device()?;
+    pub fn device(&self) -> Result<udev::Device> {
+        let device = self.1.device()?;
+        Ok(device)
+    }
+
+    pub fn hub(&self) -> Result<udev::Device> {
+        let mut device = self.device()?;
         for _ in 0..self.0 {
             device = device.parent().context(anyhow!(
                 "Failed to obtain parent device while resolving `{self}`"

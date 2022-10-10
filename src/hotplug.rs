@@ -1,12 +1,13 @@
 use crate::cli;
 use crate::docker::Container;
 use crate::tokio_ext::WithJoinHandleGuard;
-use crate::udev_ext::{into_stream, DeviceExt};
+use crate::udev_ext::{into_stream, DeviceExt, DeviceSummary};
 
-use anyhow::{anyhow, bail, Error, Result};
+use anyhow::{anyhow, bail, Error, Result, Context};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
 use tokio::signal::unix::{signal, SignalKind};
@@ -21,6 +22,7 @@ use udev::{Device, Enumerator, EventType};
 enum Event {
     Signal(SignalKind),
     ContainerStop(i64),
+    Started,
     UdevAdd(Device, (u64, u64), PathBuf),
     UdevRemove(Device),
 }
@@ -29,8 +31,7 @@ impl Event {
     pub fn from_udev(event_type: EventType, device: udev::Device) -> Option<Self> {
         match event_type {
             EventType::Add => {
-                let devnum = device.device_number()?;
-                let devnode = device.devnode()?.to_owned();
+                let (_, devnum, devnode) = device.summary()?;
                 Some(Self::UdevAdd(device, devnum, devnode))
             }
             EventType::Remove => Some(Self::UdevRemove(device)),
@@ -39,29 +40,59 @@ impl Event {
     }
 }
 
+#[derive(Clone)]
+pub struct HotplugDeviceSummary(PathBuf, (u64, u64), PathBuf, Option<PathBuf>);
+
+impl HotplugDeviceSummary {
+    fn as_tuple(&self) -> (&PathBuf, (u64, u64), &PathBuf, Option<&PathBuf>) {
+        (&self.0, self.1, &self.2, self.3.as_ref())
+    }
+}
+
+impl Display for HotplugDeviceSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (_syspath, (major, minor), devnode, symlink) = self.as_tuple();
+        if let Some(symlink) = symlink {
+            write!(f, "{major:0>3}:{minor:0>3} [{}, {}]", devnode.display(), symlink.display())
+        } else {
+            write!(f, "{major:0>3}:{minor:0>3} [{}]", devnode.display())
+        }
+    }
+}
+
 pub enum HotPlugEvent {
-    Add(Device, (u64, u64), PathBuf, Option<PathBuf>),
-    Remove(Device, (u64, u64), PathBuf, Option<PathBuf>),
+    RequiredMissing(Vec<DeviceSummary>),
+    Add(HotplugDeviceSummary),
+    ReAdd(HotplugDeviceSummary, HotplugDeviceSummary),
+    Remove(HotplugDeviceSummary),
+    RequiredRemoved(HotplugDeviceSummary),
 }
 
 fn udev_task(hub: Device, tx: UnboundedSender<Event>) -> JoinHandle<Result<()>> {
     spawn(async move {
         let hub_path = hub.syspath();
 
+        let map_fn = |event_type: EventType, device: Device| {
+            if !device.syspath().starts_with(&hub_path) {
+                None
+            } else {
+                Event::from_udev(event_type, device)
+            }
+        };
+
         let listener = udev::MonitorBuilder::new()?.listen()?;
         let listener = into_stream(listener)
             .filter_map(|event| event.ok())
-            .map(|event| (event.event_type(), event.device()));
+            .filter_map(|event| map_fn(event.event_type(), event.device()));
 
         let mut enumerator = Enumerator::new()?;
         let existing = enumerator
             .scan_devices()?
-            .map(|device| (EventType::Add, device));
+            .filter_map(|device| map_fn(EventType::Add, device));
 
         let events = iter(existing)
-            .chain(listener)
-            .filter(|(_, device)| device.syspath().starts_with(&hub_path))
-            .filter_map(|(event_type, device)| Event::from_udev(event_type, device));
+            .chain(tokio_stream::once(Event::Started))
+            .chain(listener);
 
         tokio::pin!(events);
         loop {
@@ -115,12 +146,8 @@ fn sigs_task(tx: tokio::sync::mpsc::UnboundedSender<Event>) -> JoinHandle<Result
     })
 }
 
-async fn allow_device(
-    container: &Container,
-    devnum: (u64, u64),
-    devnode: &PathBuf,
-    symlink: &Option<PathBuf>,
-) -> Result<()> {
+async fn allow_device(container: &Container, summary: &HotplugDeviceSummary) -> Result<()> {
+    let (_, devnum, devnode, symlink) = summary.as_tuple();
     container.device(devnum, (true, true, true)).await?;
     container.mknod(&devnode, devnum).await?;
     if let Some(symlink) = symlink {
@@ -129,12 +156,8 @@ async fn allow_device(
     Ok(())
 }
 
-async fn deny_device(
-    container: &Container,
-    devnum: (u64, u64),
-    devnode: &PathBuf,
-    symlink: &Option<PathBuf>,
-) -> Result<()> {
+async fn deny_device(container: &Container, summary: &HotplugDeviceSummary) -> Result<()> {
+    let (_, devnum, devnode, symlink) = summary.as_tuple();
     container.device(devnum, (false, false, false)).await?;
     container.rm(&devnode).await?;
     if let Some(symlink) = symlink {
@@ -143,23 +166,31 @@ async fn deny_device(
     Ok(())
 }
 
-pub fn hotplug<F, L>(
+pub fn hotplug<F, S, L>(
     container: Container,
+    dev: Device,
     hub: Device,
     symlink_fn: F,
-    log_fn: L,
+    start_cb: S,
+    log_cb: L,
 ) -> JoinHandle<Result<i64, Error>>
 where
     F: Send + Clone + Fn(&udev::Device) -> Option<PathBuf> + 'static,
+    S: Send + Clone + Fn(&Container) -> () + 'static,
     L: Send + Clone + Fn(HotPlugEvent) -> () + 'static,
 {
     let (tx, mut rx) = unbounded_channel::<Event>();
     spawn(async move {
-        let _udev_guard = udev_task(hub, tx.clone()).guard();
+        let _udev_guard = udev_task(hub.clone(), tx.clone()).guard();
         let _stop_guard = stop_task(container.clone(), tx.clone()).guard();
         let _sigs_guard = sigs_task(tx.clone()).guard();
 
-        let mut devices = HashMap::<Cow<Path>, ((u64, u64), PathBuf, Option<PathBuf>)>::default();
+        let mut devices = HashMap::<Cow<Path>, HotplugDeviceSummary>::default();
+
+        let required = HashMap::<Cow<Path>, DeviceSummary>::from([
+            (hub.syspath().into(), hub.summary().context("Failed to obtain basic information about required device")?),
+            (dev.syspath().into(), dev.summary().context("Failed to obtain basic information about required device")?),
+        ]);
 
         while let Some(event) = rx.recv().await {
             match event {
@@ -169,37 +200,50 @@ where
                 Event::ContainerStop(status) => {
                     return Ok(status);
                 }
+                Event::Started => {
+                    let missing: Vec<_> = required
+                        .iter()
+                        .filter_map(|(syspath, summary)| {
+                            if devices.contains_key(syspath) {
+                                None
+                            } else {
+                                Some(summary)
+                            }
+                        }).cloned().collect();
+
+                    if missing.is_empty() {
+                        start_cb(&container);
+                    } else {
+                        log_cb(HotPlugEvent::RequiredMissing(missing));
+                        container.remove(true).await?;
+                    }
+                }
                 Event::UdevAdd(device, devnum, devnode) => {
                     let syspath = device.syspath();
-                    if let Some((devnum, devnode, symlink)) = devices.remove(syspath.into()) {
-                        deny_device(&container, devnum, &devnode, &symlink).await?;
-                        log_fn(HotPlugEvent::Remove(
-                            device.clone(),
-                            devnum,
-                            devnode,
-                            symlink,
-                        ));
+                    let summary = HotplugDeviceSummary(syspath.to_owned(), devnum, devnode, symlink_fn(&device));
+
+                    let old = devices.remove(syspath.into());
+                    if let Some(old) = &old {
+                        log_cb(HotPlugEvent::ReAdd(summary.clone(), old.clone()));
+                        deny_device(&container, old).await?;
+                    } else {
+                        log_cb(HotPlugEvent::Add(summary.clone()));
                     }
 
-                    let symlink = symlink_fn(&device);
-                    allow_device(&container, devnum, &devnode, &symlink).await?;
-                    devices.insert(
-                        device.syspath().to_owned().into(),
-                        (devnum, devnode.clone(), symlink.clone()),
-                    );
-
-                    log_fn(HotPlugEvent::Add(device.clone(), devnum, devnode, symlink));
+                    allow_device(&container, &summary).await?;
+                    devices.insert(syspath.to_owned().into(), summary);
                 }
                 Event::UdevRemove(device) => {
                     let syspath = device.syspath();
-                    if let Some((devnum, devnode, symlink)) = devices.remove(syspath.into()) {
-                        deny_device(&container, devnum, &devnode, &symlink).await?;
-                        log_fn(HotPlugEvent::Remove(
-                            device.clone(),
-                            devnum,
-                            devnode,
-                            symlink,
-                        ));
+                    if let Some(summary) = devices.remove(syspath.into()) {
+                        if required.contains_key(syspath.into()) {
+                            log_cb(HotPlugEvent::RequiredRemoved(summary));
+                            container.remove(true).await?;
+                            continue;
+                        } else {
+                            log_cb(HotPlugEvent::Remove(summary.clone()));
+                            deny_device(&container, &summary).await?;
+                        }
                     }
                 }
             }
@@ -210,33 +254,41 @@ where
 }
 
 pub trait HotPlug {
-    fn hotplug<L>(
+    fn hotplug<L, S>(
         &self,
+        dev: Device,
         hub: Device,
         symlinks: Vec<cli::Symlink>,
-        log_fn: L,
-    ) -> JoinHandle<Result<i64, Error>>
-    where
-        L: Send + Clone + Fn(HotPlugEvent) -> () + 'static;
-}
-
-impl HotPlug for Container {
-    fn hotplug<L>(
-        &self,
-        hub: Device,
-        symlinks: Vec<cli::Symlink>,
-        log_fn: L,
+        start_cb: S,
+        log_cb: L,
     ) -> JoinHandle<Result<i64, Error>>
     where
         L: Send + Clone + Fn(HotPlugEvent) -> () + 'static,
+        S: Send + Clone + Fn(&Container) -> () + 'static;
+}
+
+impl HotPlug for Container {
+    fn hotplug<L, S>(
+        &self,
+        dev: Device,
+        hub: Device,
+        symlinks: Vec<cli::Symlink>,
+        start_cb: S,
+        log_cb: L,
+    ) -> JoinHandle<Result<i64, Error>>
+    where
+        L: Send + Clone + Fn(HotPlugEvent) -> () + 'static,
+        S: Send + Clone + Fn(&Container) -> () + 'static,
     {
         hotplug(
             self.clone(),
+            dev,
             hub,
             move |device| {
                 symlinks.iter().find_map(|dev| dev.matches(device))
             },
-            log_fn,
+            start_cb,
+            log_cb,
         )
     }
 }

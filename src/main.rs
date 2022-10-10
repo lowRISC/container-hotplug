@@ -41,19 +41,23 @@ enum Action {
 
 fn log_event(event: HotPlugEvent) {
     match event {
-        HotPlugEvent::Add(_device, (major, minor), devnode, symlink) => {
-            let mut nodes = vec![devnode.display()];
-            if let Some(symlink) = &symlink {
-                nodes.push(symlink.display());
-            }
-            debug!("Attaching device {major:0>3}:{minor:0>3} {nodes:?}");
+        HotPlugEvent::Add(dev) => {
+            debug!("Attaching device {dev}");
         }
-        HotPlugEvent::Remove(_device, (major, minor), devnode, symlink) => {
-            let mut nodes = vec![devnode.display()];
-            if let Some(symlink) = &symlink {
-                nodes.push(symlink.display());
+        HotPlugEvent::Remove(dev) => {
+            debug!("Detaching device {dev}");
+        }
+        HotPlugEvent::ReAdd(new, old) => {
+            debug!("Reattaching device {new} (was {old})");
+        }
+        HotPlugEvent::RequiredRemoved(dev) => {
+            debug!("Detaching required device {dev}");
+            debug!("Container will be stopped now");
+        }
+        HotPlugEvent::RequiredMissing(devs) => {
+            for (_, (major, minor), devnode) in devs {
+                debug!("Missing required device {major:0>3}:{minor:0>3} [{}]", devnode.display());
             }
-            debug!("Detaching device {major:0>3}:{minor:0>3} {nodes:?}");
         }
     }
 }
@@ -67,8 +71,9 @@ where
     Fut: Future<Output = Result<Container>>,
     F: FnOnce() -> Fut,
 {
+    let dev = device.device()?;
     let hub = device
-        .target()
+        .hub()
         .context(anyhow!("Failed to get device `{}`", device.id()))?;
     let container = get_container().await?;
     container.ensure_running().await?;
@@ -77,8 +82,16 @@ where
     let id = container.id();
     info!("Attaching to container {name} ({id})");
 
+    let on_start = |container: &Container| {
+        let container = container.clone();
+        tokio::spawn(async move {
+            container.attach().await?.pipe_std()?;
+            Ok::<(), anyhow::Error>(())
+        });
+    };
+
     let status = container
-        .hotplug(hub, symlinks, log_event)
+        .hotplug(dev, hub, symlinks, on_start, log_event)
         .await??;
     info!("Container {name} ({id}) exited with status code {status}");
 
@@ -105,7 +118,6 @@ async fn main() -> Result<()> {
             let get_container = || async move {
                 let docker = Docker::connect_with_defaults()?;
                 let container = docker.run(docker_args).await?;
-                container.attach().await?.pipe_std()?;
                 Ok(container)
             };
 

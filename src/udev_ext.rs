@@ -1,5 +1,10 @@
+use std::path::PathBuf;
+
+pub type DeviceSummary = (PathBuf, (u64, u64), PathBuf);
+
 pub trait DeviceExt {
     fn device_number(&self) -> Option<(u64, u64)>;
+    fn summary(&self) -> Option<DeviceSummary>;
 }
 
 impl DeviceExt for udev::Device {
@@ -10,6 +15,12 @@ impl DeviceExt for udev::Device {
                 (devnum & 0xff) | ((devnum >> 12) & 0xfff00),
             )
         })
+    }
+
+    fn summary(&self) -> Option<DeviceSummary> {
+        let devnum = self.device_number()?;
+        let devnode = self.devnode()?.to_owned();
+        Some((self.syspath().to_owned(), devnum, devnode))
     }
 }
 

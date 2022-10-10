@@ -78,7 +78,7 @@ impl Container {
         &self.0
     }
 
-    pub async fn remove(self, force: bool) -> Result<()> {
+    pub async fn remove(&self, force: bool) -> Result<()> {
         let options = bollard::container::RemoveContainerOptions {
             force,
             ..Default::default()
@@ -237,11 +237,10 @@ impl Container {
         source: T,
         link: U,
     ) -> Result<()> {
-        self.rm(&link).await?;
         self.mkdir_for(&link).await?;
         self.exec([
             "ln",
-            "-s",
+            "-sf",
             &source.as_ref().to_string_lossy(),
             &link.as_ref().to_string_lossy(),
         ])

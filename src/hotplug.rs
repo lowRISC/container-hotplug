@@ -3,7 +3,7 @@ use crate::docker::Container;
 use crate::tokio_ext::WithJoinHandleGuard;
 use crate::udev_ext::{into_stream, DeviceExt, DeviceSummary};
 
-use anyhow::{anyhow, bail, Error, Result, Context};
+use anyhow::{anyhow, bail, Context, Error, Result};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -53,7 +53,12 @@ impl Display for HotplugDeviceSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (_syspath, (major, minor), devnode, symlink) = self.as_tuple();
         if let Some(symlink) = symlink {
-            write!(f, "{major:0>3}:{minor:0>3} [{}, {}]", devnode.display(), symlink.display())
+            write!(
+                f,
+                "{major:0>3}:{minor:0>3} [{}, {}]",
+                devnode.display(),
+                symlink.display()
+            )
         } else {
             write!(f, "{major:0>3}:{minor:0>3} [{}]", devnode.display())
         }
@@ -133,8 +138,7 @@ fn sigs_task(tx: tokio::sync::mpsc::UnboundedSender<Event>) -> JoinHandle<Result
             .merge(signal_stream(SignalKind::quit()))
             .merge(signal_stream(SignalKind::terminate()))
             .merge(signal_stream(SignalKind::user_defined1()))
-            .merge(signal_stream(SignalKind::user_defined2()))
-            ;
+            .merge(signal_stream(SignalKind::user_defined2()));
 
         tokio::pin!(stream);
         while let Some(signal) = stream.next().await {
@@ -188,8 +192,16 @@ where
         let mut devices = HashMap::<Cow<Path>, HotplugDeviceSummary>::default();
 
         let required = HashMap::<Cow<Path>, DeviceSummary>::from([
-            (hub.syspath().into(), hub.summary().context("Failed to obtain basic information about required device")?),
-            (dev.syspath().into(), dev.summary().context("Failed to obtain basic information about required device")?),
+            (
+                hub.syspath().into(),
+                hub.summary()
+                    .context("Failed to obtain basic information about required device")?,
+            ),
+            (
+                dev.syspath().into(),
+                dev.summary()
+                    .context("Failed to obtain basic information about required device")?,
+            ),
         ]);
 
         while let Some(event) = rx.recv().await {
@@ -209,7 +221,9 @@ where
                             } else {
                                 Some(summary)
                             }
-                        }).cloned().collect();
+                        })
+                        .cloned()
+                        .collect();
 
                     if missing.is_empty() {
                         start_cb(&container);
@@ -220,7 +234,12 @@ where
                 }
                 Event::UdevAdd(device, devnum, devnode) => {
                     let syspath = device.syspath();
-                    let summary = HotplugDeviceSummary(syspath.to_owned(), devnum, devnode, symlink_fn(&device));
+                    let summary = HotplugDeviceSummary(
+                        syspath.to_owned(),
+                        devnum,
+                        devnode,
+                        symlink_fn(&device),
+                    );
 
                     let old = devices.remove(syspath.into());
                     if let Some(old) = &old {
@@ -284,9 +303,7 @@ impl HotPlug for Container {
             self.clone(),
             dev,
             hub,
-            move |device| {
-                symlinks.iter().find_map(|dev| dev.matches(device))
-            },
+            move |device| symlinks.iter().find_map(|dev| dev.matches(device)),
             start_cb,
             log_cb,
         )

@@ -82,10 +82,9 @@ impl SymlinkDevice {
     fn matches_impl(&self, device: &udev::Device) -> Option<bool> {
         let matches = match self {
             SymlinkDevice::Usb(vid, pid, ifc) => {
-                true
-                && device.property_value("ID_VENDOR_ID")?.to_str()? == vid
-                && device.property_value("ID_MODEL_ID")?.to_str()? == pid
-                && device.property_value("ID_USB_INTERFACE_NUM")?.to_str()? == ifc
+                device.property_value("ID_VENDOR_ID")?.to_str()? == vid
+                    && device.property_value("ID_MODEL_ID")?.to_str()? == pid
+                    && device.property_value("ID_USB_INTERFACE_NUM")?.to_str()? == ifc
             }
         };
         Some(matches)

@@ -56,7 +56,10 @@ fn log_event(event: HotPlugEvent) {
         }
         HotPlugEvent::RequiredMissing(devs) => {
             for (_, (major, minor), devnode) in devs {
-                debug!("Missing required device {major:0>3}:{minor:0>3} [{}]", devnode.display());
+                debug!(
+                    "Missing required device {major:0>3}:{minor:0>3} [{}]",
+                    devnode.display()
+                );
             }
         }
     }

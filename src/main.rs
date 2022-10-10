@@ -2,7 +2,7 @@ mod cli;
 mod docker;
 mod hotplug;
 mod tokio_ext;
-mod udev_device_ext;
+mod udev_ext;
 
 use cli::{Device, Symlink};
 use docker::{Container, Docker};
@@ -41,15 +41,19 @@ enum Action {
 
 fn log_event(event: HotPlugEvent) {
     match event {
-        HotPlugEvent::Add((major, minor), nodes) => {
-            let nodes: Vec<_> = nodes.into_iter().map(|p| p.display().to_string()).collect();
-            let nodes = nodes.join(", ");
-            debug!("Attaching device {major:0>3}:{minor:0>3} ({nodes})");
+        HotPlugEvent::Add(_device, (major, minor), devnode, symlink) => {
+            let mut nodes = vec![devnode.display()];
+            if let Some(symlink) = &symlink {
+                nodes.push(symlink.display());
+            }
+            debug!("Attaching device {major:0>3}:{minor:0>3} {nodes:?}");
         }
-        HotPlugEvent::Remove((major, minor), nodes) => {
-            let nodes: Vec<_> = nodes.into_iter().map(|p| p.display().to_string()).collect();
-            let nodes = nodes.join(", ");
-            debug!("Detaching device {major:0>3}:{minor:0>3} ({nodes})");
+        HotPlugEvent::Remove(_device, (major, minor), devnode, symlink) => {
+            let mut nodes = vec![devnode.display()];
+            if let Some(symlink) = &symlink {
+                nodes.push(symlink.display());
+            }
+            debug!("Detaching device {major:0>3}:{minor:0>3} {nodes:?}");
         }
     }
 }
@@ -63,20 +67,18 @@ where
     Fut: Future<Output = Result<Container>>,
     F: FnOnce() -> Fut,
 {
-    let root_device = device
+    let hub = device
         .target()
         .context(anyhow!("Failed to get device `{}`", device.id()))?;
     let container = get_container().await?;
     container.ensure_running().await?;
-
-    let symlinks = symlinks.iter().map(|sl| (sl.id(), sl.path()));
 
     let name = container.name().await?;
     let id = container.id();
     info!("Attaching to container {name} ({id})");
 
     let status = container
-        .hotplug(&root_device, symlinks, log_event)
+        .hotplug(hub, symlinks, log_event)
         .await??;
     info!("Container {name} ({id}) exited with status code {status}");
 

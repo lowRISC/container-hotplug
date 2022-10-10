@@ -1,10 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{bail, ensure, Error, Result};
 
 #[derive(Clone)]
-pub struct Symlink(String, PathBuf);
+pub enum SymlinkDevice {
+    Usb(String, String, String),
+}
+
+#[derive(Clone)]
+pub struct Symlink(SymlinkDevice, PathBuf);
 
 fn is_hex4(val: &str) -> bool {
     val.len() == 4 && val.chars().all(|c| c.is_ascii_hexdigit())
@@ -62,8 +67,9 @@ impl FromStr for Symlink {
 
                 let vid = vid.to_ascii_lowercase();
                 let pid = pid.to_ascii_lowercase();
+                let ifc = format!("{ifc:0>2}");
 
-                Ok(Symlink(format!("usb:{vid}:{pid}:{ifc:0>2}"), path))
+                Ok(Symlink(SymlinkDevice::Usb(vid, pid, ifc), path))
             }
             _ => {
                 bail!("Symlink PREFIX should be `usb`, found `{prefix}`");
@@ -72,11 +78,30 @@ impl FromStr for Symlink {
     }
 }
 
-impl Symlink {
-    pub fn id(&self) -> &str {
-        &self.0
+impl SymlinkDevice {
+    fn matches_impl(&self, device: &udev::Device) -> Option<bool> {
+        let matches = match self {
+            SymlinkDevice::Usb(vid, pid, ifc) => {
+                true
+                && device.property_value("ID_VENDOR_ID")?.to_str()? == vid
+                && device.property_value("ID_MODEL_ID")?.to_str()? == pid
+                && device.property_value("ID_USB_INTERFACE_NUM")?.to_str()? == ifc
+            }
+        };
+        Some(matches)
     }
-    pub fn path(&self) -> &Path {
-        &self.1
+
+    pub fn matches(&self, device: &udev::Device) -> bool {
+        self.matches_impl(device).unwrap_or(false)
+    }
+}
+
+impl Symlink {
+    pub fn matches(&self, device: &udev::Device) -> Option<PathBuf> {
+        if self.0.matches(device) {
+            Some(self.1.clone())
+        } else {
+            None
+        }
     }
 }

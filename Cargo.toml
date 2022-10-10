@@ -19,6 +19,7 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["full"] }
 tokio-fd = "0.3"
 async-stream = "0.3"
+async-trait = "0.1"
 termsize = "0.1"
 futures-core = "0.3"
 udev = { git="https://github.com/jprendes/udev-rs.git", features = ["send"] }

@@ -1,7 +1,11 @@
+use crate::tokio_ext::WithJoinHandleGuard;
+
 use super::{IoStream, IoStreamSource};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use tokio::io::AsyncWriteExt;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::task::{spawn, JoinHandle};
 use tokio_stream::StreamExt;
 
 #[derive(Clone)]
@@ -59,17 +63,6 @@ impl Container {
     }
 
     pub async fn attach(&self) -> Result<IoStream> {
-        /*
-        let output = tokio::process::Command::new("docker")
-            .args([
-                "attach",
-            ])
-            .stdout(std::process::Stdio::piped())
-            .spawn()?
-            .wait_with_output()
-            .await?;
-        */
-
         let options = bollard::container::AttachContainerOptions::<String> {
             stdin: Some(true),
             stdout: Some(true),
@@ -221,6 +214,34 @@ impl Container {
 
         Ok(())
     }
+
+    pub async fn pipe_signals(&self) -> JoinHandle<Result<()>> {
+        let container = self.clone();
+        let handle = spawn(async move {
+            let stream = tokio_stream::empty()
+                .merge(signal_stream(SignalKind::alarm()))
+                .merge(signal_stream(SignalKind::hangup()))
+                .merge(signal_stream(SignalKind::interrupt()))
+                .merge(signal_stream(SignalKind::quit()))
+                .merge(signal_stream(SignalKind::terminate()))
+                .merge(signal_stream(SignalKind::user_defined1()))
+                .merge(signal_stream(SignalKind::user_defined2()));
+
+            tokio::pin!(stream);
+            while let Some(signal) = stream.next().await {
+                container.kill(signal?.as_raw_value()).await?;
+            }
+
+            Err::<(), Error>(anyhow!("Failed to listen for signals"))
+        });
+
+        let container = self.clone();
+        spawn(async move {
+            let _guard = handle.guard();
+            container.wait().await?;
+            Ok::<(), Error>(())
+        })
+    }
 }
 
 async fn allow_device_cgroup1(
@@ -247,4 +268,14 @@ async fn deny_device_cgroup1(
     let mut data = bytes::Bytes::from(format!("c {major}:{minor} {permissions}"));
     file.write_all_buf(&mut data).await?;
     Ok(())
+}
+
+fn signal_stream(kind: SignalKind) -> impl tokio_stream::Stream<Item = Result<SignalKind>> {
+    async_stream::try_stream! {
+        let sig_kind = SignalKind::hangup();
+        let mut sig_stream = signal(kind)?;
+        while let Some(_) = sig_stream.recv().await {
+            yield sig_kind;
+        }
+    }
 }

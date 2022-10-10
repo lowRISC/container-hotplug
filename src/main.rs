@@ -95,7 +95,7 @@ where
 
     let status = container
         .hotplug(dev, hub, symlinks, on_start, log_event)
-        .await??;
+        .await?;
     info!("Container {name} ({id}) exited with status code {status}");
 
     Ok(())
@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
             let get_container = || async move {
                 let docker = Docker::connect_with_defaults()?;
                 let container = docker.run(docker_args).await?;
+                let _ = container.pipe_signals();
                 Ok(container)
             };
 

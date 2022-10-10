@@ -1,6 +1,7 @@
 use crate::tokio_ext::WithJoinHandleGuard;
 
 use anyhow::{Context, Result};
+use async_stream::try_stream;
 use bollard::container::LogOutput;
 use bollard::errors::Error;
 use raw_tty::GuardMode;
@@ -46,7 +47,7 @@ impl IoStream {
             t.c_cflag |= CS8;
             t
         })?;
-        let resize_stream = async_stream::try_stream! {
+        let resize_stream = try_stream! {
             let mut stream = signal(SignalKind::window_change())?;
             loop {
                 let size = termsize::get().context("Failed to obtain tty size")?;

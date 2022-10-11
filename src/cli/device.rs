@@ -178,10 +178,6 @@ impl DeviceType {
 }
 
 impl Device {
-    pub fn id(&self) -> String {
-        self.to_string()
-    }
-
     pub fn device(&self) -> Result<udev::Device> {
         let device = self.1.device()?;
         Ok(device)

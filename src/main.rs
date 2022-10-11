@@ -6,13 +6,16 @@ mod udev_ext;
 
 use cli::{Device, Symlink};
 use docker::{Container, Docker};
-use hotplug::{HotPlug, HotPlugEvent};
+use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
 
-use std::future::Future;
+use std::fmt::Display;
+use tokio_stream::StreamExt;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use log::{debug, info};
+use log::info;
+
+use crate::hotplug::PluggableDevice;
 
 #[derive(Parser)]
 struct Args {
@@ -30,75 +33,79 @@ enum Action {
         #[arg(trailing_var_arg = true)]
         docker_args: Vec<String>,
     },
-    Attach {
-        container_id: String,
-        #[arg(short = 'd', long)]
-        root_device: Device,
-        #[arg(short = 'l', long)]
-        symlink: Vec<Symlink>,
-    },
 }
 
-fn log_event(event: HotPlugEvent) {
-    match event {
-        HotPlugEvent::Add(dev) => {
-            debug!("Attaching device {dev}");
+#[derive(Clone)]
+enum Event {
+    Add(PluggedDevice),
+    Remove(PluggedDevice),
+    Initialized(Container),
+    Stopped(Container, i64),
+}
+
+impl From<HotPlugEvent> for Event {
+    fn from(evt: HotPlugEvent) -> Self {
+        match evt {
+            HotPlugEvent::Add(dev) => Self::Add(dev),
+            HotPlugEvent::Remove(dev) => Self::Remove(dev),
         }
-        HotPlugEvent::Remove(dev) => {
-            debug!("Detaching device {dev}");
-        }
-        HotPlugEvent::ReAdd(new, old) => {
-            debug!("Reattaching device {new} (was {old})");
-        }
-        HotPlugEvent::RequiredRemoved(dev) => {
-            debug!("Detaching required device {dev}");
-            debug!("Container will be stopped now");
-        }
-        HotPlugEvent::RequiredMissing(devs) => {
-            for (_, (major, minor), devnode) in devs {
-                debug!(
-                    "Missing required device {major:0>3}:{minor:0>3} [{}]",
-                    devnode.display()
-                );
+    }
+}
+
+impl Display for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Event::Add(dev) => {
+                write!(f, "Attaching device {dev}")
+            }
+            Event::Remove(dev) => {
+                write!(f, "Detaching device {dev}")
+            }
+            Event::Initialized(_) => {
+                write!(f, "Container initialized")
+            }
+            Event::Stopped(_, status) => {
+                write!(f, "Container exited with status {status}")
             }
         }
     }
 }
 
-async fn run_ci_container<'a, Fut, F>(
-    device: &Device,
+fn run_ci_container(
+    device: Device,
     symlinks: Vec<Symlink>,
-    get_container: F,
-) -> Result<()>
-where
-    Fut: Future<Output = Result<Container>>,
-    F: FnOnce() -> Fut,
-{
-    let dev = device.device()?;
-    let hub = device
-        .hub()
-        .context(anyhow!("Failed to get device `{}`", device.id()))?;
-    let container = get_container().await?;
-    container.ensure_running().await?;
+    container: Container,
+) -> impl tokio_stream::Stream<Item = Result<Event>> {
+    async_stream::try_stream! {
+        let name = container.name().await?;
+        let id = container.id();
+        info!("Attaching to container {name} ({id})");
 
-    let name = container.name().await?;
-    let id = container.id();
-    info!("Attaching to container {name} ({id})");
+        let hub_path = device.hub()?.syspath().to_owned();
+        let device = PluggableDevice::from_device(&device.device()?)
+            .context("Failed to obtain basic device information")?;
 
-    let on_start = |container: &Container| {
-        let container = container.clone();
-        tokio::spawn(async move {
-            container.attach().await?.pipe_std()?;
-            Ok::<(), anyhow::Error>(())
-        });
-    };
+        let mut hotplug = HotPlug::new(container.clone(), device, hub_path.clone(), symlinks)?;
 
-    let status = container
-        .hotplug(dev, hub, symlinks, on_start, log_event)
-        .await?;
-    info!("Container {name} ({id}) exited with status code {status}");
+        {
+            let events = hotplug.start();
+            tokio::pin!(events);
+            while let Some(event) = events.next().await {
+                yield Event::from(event?);
+            }
+        }
 
-    Ok(())
+        yield Event::Initialized(container.clone());
+        container.attach().await?.pipe_std()?;
+
+        {
+            let events = hotplug.run();
+            tokio::pin!(events);
+            while let Some(event) = events.next().await {
+                yield Event::from(event?);
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -118,27 +125,40 @@ async fn main() -> Result<()> {
             symlink,
             docker_args,
         } => {
-            let get_container = || async move {
-                let docker = Docker::connect_with_defaults()?;
-                let container = docker.run(docker_args).await?;
-                let _ = container.pipe_signals();
-                Ok(container)
+            let docker = Docker::connect_with_defaults()?;
+            let container = docker.run(docker_args).await?;
+            let _ = container.pipe_signals();
+            let _guard = container.guard();
+
+            let dev_path = root_device.device()?.syspath().to_owned();
+            let hotplug_stream = run_ci_container(root_device, symlink, container.clone());
+            let container_stream = {
+                let container = container.clone();
+                async_stream::try_stream! {
+                    let status = container.wait().await?;
+                    yield Event::Stopped(container.clone(), status)
+                }
             };
 
-            run_ci_container(&root_device, symlink, get_container).await?;
-        }
-        Action::Attach {
-            container_id,
-            root_device,
-            symlink,
-        } => {
-            let get_container = || async move {
-                Docker::connect_with_defaults()?
-                    .get_container(container_id)
-                    .await
-            };
+            let stream = tokio_stream::empty()
+                .merge(hotplug_stream)
+                .merge(container_stream);
 
-            run_ci_container(&root_device, symlink, get_container).await?;
+            tokio::pin!(stream);
+            while let Some(event) = stream.next().await {
+                let event = event?;
+                info!("{}", event);
+                match event {
+                    Event::Remove(dev) if dev.syspath() == dev_path => {
+                        info!("Root device detached. Stopping container.");
+                        container.remove(true).await?;
+                    }
+                    Event::Stopped(_, _) => {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
         }
     };
 

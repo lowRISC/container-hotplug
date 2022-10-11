@@ -14,6 +14,7 @@ clap = { version = "4.0", features = ["default", "derive", "unicode", "wrap_help
 libc = "0.2"
 bytes = "1.2"
 raw_tty = "0.1"
+usb-ids = "0.2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["full"] }
@@ -21,6 +22,7 @@ tokio-fd = "0.3"
 async-stream = "0.3"
 async-trait = "0.1"
 termsize = "0.1"
+unescape = "0.1"
 futures-core = "0.3"
 udev = { git="https://github.com/jprendes/udev-rs.git", features = ["send"] }
 bollard = "0.13"

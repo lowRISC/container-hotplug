@@ -11,9 +11,24 @@ use tokio_stream::StreamExt;
 #[derive(Clone)]
 pub struct Container(pub(super) String, pub(super) bollard::Docker);
 
+pub struct ContainerGuard(Container);
+
+impl Drop for ContainerGuard {
+    fn drop(&mut self) {
+        let container = self.0.clone();
+        spawn(async move {
+            container.remove(true).await.ok();
+        });
+    }
+}
+
 impl Container {
     pub fn id(&self) -> &str {
         &self.0
+    }
+
+    pub fn guard(&self) -> ContainerGuard {
+        ContainerGuard(self.clone())
     }
 
     pub async fn remove(&self, force: bool) -> Result<()> {
@@ -22,11 +37,6 @@ impl Container {
             ..Default::default()
         };
         self.1.remove_container(&self.0, Some(options)).await?;
-        Ok(())
-    }
-
-    pub async fn start(&self) -> Result<()> {
-        self.1.start_container::<String>(&self.0, None).await?;
         Ok(())
     }
 
@@ -84,19 +94,6 @@ impl Container {
 
     async fn inspect(&self) -> Result<bollard::models::ContainerInspectResponse> {
         Ok(self.1.inspect_container(self.0.as_ref(), None).await?)
-    }
-
-    pub async fn running(&self) -> Result<bool> {
-        let inspect = self.inspect().await?;
-        let state = inspect.state.context("Failed to obtain container state")?;
-        Ok(state.running.unwrap_or(false))
-    }
-
-    pub async fn ensure_running(&self) -> Result<()> {
-        if !self.running().await? {
-            self.start().await?;
-        }
-        Ok(())
     }
 
     pub async fn name(&self) -> Result<String> {

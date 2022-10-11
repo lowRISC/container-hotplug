@@ -1,5 +1,3 @@
-use crate::tokio_ext::WithJoinHandleGuard;
-
 use super::{IoStream, IoStreamSource};
 
 use anyhow::{anyhow, Context, Error, Result};
@@ -234,8 +232,8 @@ impl Container {
 
         let container = self.clone();
         spawn(async move {
-            let _guard = handle.guard();
-            container.wait().await?;
+            container.wait().await.ok();
+            handle.abort();
             Ok::<(), Error>(())
         })
     }

@@ -1,8 +1,6 @@
 mod cli;
 mod docker;
 mod hotplug;
-mod tokio_ext;
-mod udev_ext;
 
 use cli::{Device, Symlink};
 use docker::{Container, Docker};
@@ -96,7 +94,7 @@ fn run_ci_container(
         }
 
         yield Event::Initialized(container.clone());
-        container.attach().await?.pipe_std()?;
+        container.attach().await?.pipe_std();
 
         {
             let events = hotplug.run();

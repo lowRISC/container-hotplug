@@ -1,5 +1,3 @@
-use crate::udev_ext::DeviceExt;
-
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 use udev::Device;
@@ -14,7 +12,11 @@ pub struct PluggableDevice {
 impl PluggableDevice {
     pub fn from_device(device: &Device) -> Option<Self> {
         let device = device.clone();
-        let devnum = device.device_number()?;
+        let devnum = device.devnum()?;
+        let devnum = (
+            (devnum & 0xfff00) >> 8,
+            (devnum & 0xff) | ((devnum >> 12) & 0xfff00),
+        );
         let devnode = device.devnode()?.to_owned();
         Some(Self {
             device,

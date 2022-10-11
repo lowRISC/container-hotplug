@@ -1,16 +1,17 @@
-use crate::tokio_ext::WithJoinHandleGuard;
-
 use anyhow::{Context, Result};
 use async_stream::try_stream;
 use bollard::container::LogOutput;
 use bollard::errors::Error;
+use bytes::Bytes;
 use raw_tty::GuardMode;
-use std::ops::DerefMut;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::future::pending;
+use std::io;
+use std::pin::Pin;
+use tokio::io::{sink, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::spawn;
 use tokio::task::JoinHandle;
-use tokio_stream::StreamExt;
+use tokio_stream::{empty, Stream, StreamExt};
+use tokio_util::io::{ReaderStream, StreamReader};
 
 pub(super) enum IoStreamSource {
     Container(String),
@@ -18,12 +19,18 @@ pub(super) enum IoStreamSource {
 }
 
 pub struct IoStream {
-    pub output: std::pin::Pin<
-        std::boxed::Box<dyn futures_core::stream::Stream<Item = Result<LogOutput, Error>> + Send>,
-    >,
-    pub input: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>,
+    pub output: std::pin::Pin<Box<dyn Stream<Item = Result<LogOutput, Error>> + Send>>,
+    pub input: Pin<Box<dyn AsyncWrite + Send>>,
     pub(super) source: IoStreamSource,
     pub(super) docker: bollard::Docker,
+}
+
+enum StreamData {
+    Resize(u16, u16),
+    StdIn(Bytes),
+    StdOut(Bytes),
+    StdErr(Bytes),
+    Stop,
 }
 
 impl IoStream {
@@ -35,86 +42,148 @@ impl IoStream {
         return Ok(result);
     }
 
-    pub fn pipe_std(self) -> Result<JoinHandle<Result<()>>> {
-        let mut stdin = tokio_fd::AsyncFd::try_from(libc::STDIN_FILENO)?.guard_mode()?;
-        let stdout = tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO)?.guard_mode()?;
-        let stderr = tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO)?.guard_mode()?;
-        stdin.modify_mode(|mut t| {
-            use libc::*;
-            t.c_iflag &= !(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
-            t.c_lflag &= !(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-            t.c_cflag &= !(CSIZE | PARENB);
-            t.c_cflag |= CS8;
-            t
-        })?;
+    pub fn pipe_std(self) -> JoinHandle<()> {
+        let stdin = stdin();
+        let stdout = stdout();
+        let stderr = stderr();
+
         let resize_stream = try_stream! {
             let mut stream = signal(SignalKind::window_change())?;
             loop {
-                let size = termsize::get().context("Failed to obtain tty size")?;
+                let size = termsize::get().ok_or(io::Error::from_raw_os_error(libc::ENOTTY))?;
                 yield (size.rows, size.cols);
                 stream.recv().await;
             }
         };
 
-        Ok(self.pipe(stdin, stdout, stderr, resize_stream))
+        self.pipe(stdin, stdout, stderr, resize_stream)
     }
 
-    pub fn pipe<I, II, O, OO, E, EE>(
+    pub fn pipe(
         self,
-        mut stdin: II,
-        mut stdout: OO,
-        mut stderr: EE,
-        resize_stream: impl tokio_stream::Stream<Item = Result<(u16, u16)>> + Send + 'static,
-    ) -> JoinHandle<Result<()>>
-    where
-        I: tokio::io::AsyncRead + std::marker::Unpin + Send + 'static,
-        II: DerefMut<Target = I> + std::marker::Unpin + Send + 'static,
-        O: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
-        OO: DerefMut<Target = O> + std::marker::Unpin + Send + 'static,
-        E: tokio::io::AsyncWrite + std::marker::Unpin + Send + 'static,
-        EE: DerefMut<Target = E> + std::marker::Unpin + Send + 'static,
-    {
+        stdin: Pin<Box<dyn AsyncRead + Send + 'static>>,
+        mut stdout: Pin<Box<dyn AsyncWrite + Send + 'static>>,
+        mut stderr: Pin<Box<dyn AsyncWrite + Send + 'static>>,
+        resize_stream: impl Stream<Item = io::Result<(u16, u16)>> + Send + 'static,
+    ) -> JoinHandle<()> {
         let mut input = self.input;
         let mut output = self.output;
         let docker = self.docker;
         let source = self.source;
 
-        spawn(async move {
-            let _resize_guard = spawn(async move {
-                tokio::pin!(resize_stream);
-                while let Some(size) = resize_stream.next().await {
-                    resize_tty(&docker, &source, size?).await?;
-                }
-                return Ok::<(), anyhow::Error>(());
-            })
-            .guard();
+        let resize_stream = async_stream::stream! {
+            tokio::pin!(resize_stream);
+            while let Some(data) = resize_stream.next().await {
+                yield match data {
+                    Ok((rows, cols)) => Ok(StreamData::Resize(rows, cols)),
+                    Err(err) => Err(err).context("Listening for tty resize"),
+                };
+            }
+        };
 
-            let _stdin_guarg = spawn(async move {
-                let mut buf = bytes::BytesMut::with_capacity(1024);
-                while let Ok(_) = stdin.read_buf(&mut buf).await {
-                    input.write_all_buf(&mut buf).await?;
-                }
-                return Ok::<(), anyhow::Error>(());
-            })
-            .guard();
+        let input_stream = async_stream::stream! {
+            let mut stdin = ReaderStream::new(stdin);
+            while let Some(data) = stdin.next().await {
+                yield match data {
+                    Ok(buf) => Ok(StreamData::StdIn(buf)),
+                    Err(err) => Err(err).context("Reading container input stream"),
+                };
+            }
+        };
 
+        let output_stream = async_stream::stream! {
             while let Some(output) = output.next().await {
-                match output? {
-                    LogOutput::Console { mut message } => {
-                        stdout.write_all_buf(&mut message).await?;
-                    }
-                    LogOutput::StdOut { mut message } => {
-                        stdout.write_all_buf(&mut message).await?;
-                    }
-                    LogOutput::StdErr { mut message } => {
-                        stderr.write_all_buf(&mut message).await?;
-                    }
+                yield match output {
+                    Ok(LogOutput::Console{message}) => Ok(StreamData::StdOut(message)),
+                    Ok(LogOutput::StdOut{message}) => Ok(StreamData::StdOut(message)),
+                    Ok(LogOutput::StdErr{message}) => Ok(StreamData::StdErr(message)),
+                    Err(err) => Err(err).context("Reading container output stream"),
                     _ => continue,
                 };
             }
+            yield Ok(StreamData::Stop);
+        };
 
-            return Ok::<(), anyhow::Error>(());
+        let streams = empty()
+            .merge(resize_stream)
+            .merge(input_stream)
+            .merge(output_stream);
+
+        let stream = async_stream::try_stream! {
+            tokio::pin!(streams);
+            while let Some(data) = streams.next().await {
+                match data? {
+                    StreamData::Resize(rows, cols) => {
+                        resize_tty(&docker, &source, (rows, cols)).await?;
+                    }
+                    StreamData::StdIn(mut buf) => {
+                        input.write_all_buf(&mut buf).await?;
+                    }
+                    StreamData::StdOut(mut buf) => {
+                        stdout.write_all_buf(&mut buf).await?;
+                    }
+                    StreamData::StdErr(mut buf) => {
+                        stderr.write_all_buf(&mut buf).await?;
+                    }
+                    StreamData::Stop => {
+                        break
+                    }
+                };
+                yield ();
+            }
+        };
+
+        tokio::spawn(async move {
+            tokio::pin!(stream);
+            let _ = stream.all(|_: Result<(), anyhow::Error>| true).await;
         })
+    }
+}
+
+fn stdin() -> Pin<Box<dyn tokio::io::AsyncRead + Send>> {
+    if let Ok(stdin) = try_stdin() {
+        stdin
+    } else {
+        let stream = async_stream::stream! {
+            yield pending::<std::io::Result<bytes::BytesMut>>().await;
+        };
+        Box::pin(StreamReader::new(stream))
+    }
+}
+
+fn try_stdin() -> Result<Pin<Box<dyn AsyncRead + Send>>> {
+    let mut stdin = tokio_fd::AsyncFd::try_from(libc::STDIN_FILENO)?.guard_mode()?;
+    stdin.modify_mode(|mut t| {
+        use libc::*;
+        t.c_iflag &= !(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
+        t.c_lflag &= !(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+        t.c_cflag &= !(CSIZE | PARENB);
+        t.c_cflag |= CS8;
+        t
+    })?;
+    let stream = async_stream::stream! {
+        loop {
+            let mut buf = bytes::BytesMut::with_capacity(1024);
+            match stdin.read_buf(&mut buf).await {
+                Ok(_) => yield Ok(buf),
+                Err(err) => yield Err(err),
+            }
+        }
+    };
+    Ok(Box::pin(StreamReader::new(stream)))
+}
+
+fn stdout() -> Pin<Box<dyn tokio::io::AsyncWrite + Send>> {
+    match tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO) {
+        Ok(stdout) => Box::pin(stdout),
+        Err(_) => Box::pin(sink()),
+    }
+}
+
+fn stderr() -> Pin<Box<dyn tokio::io::AsyncWrite + Send>> {
+    match tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO) {
+        Ok(stdout) => Box::pin(stdout),
+        Err(_) => Box::pin(sink()),
     }
 }
 

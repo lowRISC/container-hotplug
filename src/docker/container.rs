@@ -9,11 +9,11 @@ use tokio_stream::StreamExt;
 #[derive(Clone)]
 pub struct Container(pub(super) String, pub(super) bollard::Docker);
 
-pub struct ContainerGuard(Container);
+pub struct ContainerGuard(Option<Container>);
 
 impl Drop for ContainerGuard {
     fn drop(&mut self) {
-        let container = self.0.clone();
+        let container = self.0.take().unwrap();
         spawn(async move {
             container.remove(true).await.ok();
         });
@@ -26,7 +26,7 @@ impl Container {
     }
 
     pub fn guard(&self) -> ContainerGuard {
-        ContainerGuard(self.clone())
+        ContainerGuard(Some(self.clone()))
     }
 
     pub async fn remove(&self, force: bool) -> Result<()> {

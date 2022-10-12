@@ -2,7 +2,7 @@ mod cli;
 mod docker;
 mod hotplug;
 
-use cli::{Device, Symlink, LogFormat};
+use cli::{Device, LogFormat, Symlink};
 use docker::{Container, Docker};
 use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
 
@@ -131,10 +131,14 @@ async fn main() -> Result<ExitCode> {
             let log_env = env_logger::Env::default()
                 .filter_or("LOG", "off")
                 .write_style_or("LOG_STYLE", "auto");
-            
+
             env_logger::Builder::from_env(log_env)
                 .filter_module("container_ci_hotplug", verbosity.log_level_filter())
-                .format_timestamp(if log_format.timestamp { Some(Default::default()) } else { None })
+                .format_timestamp(if log_format.timestamp {
+                    Some(Default::default())
+                } else {
+                    None
+                })
                 .format_module_path(log_format.path)
                 .format_target(log_format.module)
                 .format_level(log_format.level)
@@ -168,8 +172,6 @@ async fn main() -> Result<ExitCode> {
                     Event::Remove(dev) if dev.syspath() == hub_path => {
                         info!("Hub device detached. Stopping container.");
                         status = ExitCode::from(5);
-                        container.kill(15).await.ok();
-                        container.remove(true).await.ok();
                         break;
                     }
                     Event::Stopped(_, _) => {
@@ -178,6 +180,9 @@ async fn main() -> Result<ExitCode> {
                     _ => {}
                 }
             }
+
+            container.kill(15).await.ok();
+            container.remove(true).await.ok();
         }
     };
 

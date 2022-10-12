@@ -1,7 +1,7 @@
 pub mod device;
-pub mod symlink;
 pub mod logfmt;
+pub mod symlink;
 
 pub use device::Device;
-pub use symlink::Symlink;
 pub use logfmt::LogFormat;
+pub use symlink::Symlink;

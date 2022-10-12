@@ -6,7 +6,7 @@ use cli::{Device, Symlink, LogFormat};
 use docker::{Container, Docker};
 use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
 
-use std::fmt::Display;
+use std::{fmt::Display, process::ExitCode};
 use tokio_stream::StreamExt;
 
 use anyhow::{Context, Result};
@@ -116,8 +116,9 @@ fn run_ci_container(
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<ExitCode> {
     let args = Args::parse();
+    let mut status = ExitCode::SUCCESS;
 
     match args.action {
         Action::Run {
@@ -166,8 +167,10 @@ async fn main() -> Result<()> {
                 match event {
                     Event::Remove(dev) if dev.syspath() == hub_path => {
                         info!("Hub device detached. Stopping container.");
+                        status = ExitCode::from(5);
                         container.kill(15).await.ok();
                         container.remove(true).await.ok();
+                        break;
                     }
                     Event::Stopped(_, _) => {
                         break;
@@ -178,5 +181,5 @@ async fn main() -> Result<()> {
         }
     };
 
-    Ok(())
+    Ok(status)
 }

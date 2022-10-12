@@ -2,7 +2,7 @@ mod cli;
 mod docker;
 mod hotplug;
 
-use cli::{Device, Symlink};
+use cli::{Device, Symlink, LogFormat};
 use docker::{Container, Docker};
 use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
 
@@ -11,6 +11,7 @@ use tokio_stream::StreamExt;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use clap_verbosity_flag::{InfoLevel, LogLevel, Verbosity};
 use log::info;
 
 use crate::hotplug::PluggableDevice;
@@ -24,6 +25,10 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     Run {
+        #[clap(flatten)]
+        verbosity: Verbosity<InfoLevel>,
+        #[clap(short = 'L', long, default_value = "")]
+        log_format: LogFormat,
         #[arg(short = 'd', long)]
         root_device: Device,
         #[arg(short = 'l', long)]
@@ -73,6 +78,7 @@ fn run_ci_container(
     device: Device,
     symlinks: Vec<Symlink>,
     container: Container,
+    verbosity: Verbosity<impl LogLevel>,
 ) -> impl tokio_stream::Stream<Item = Result<Event>> {
     async_stream::try_stream! {
         let name = container.name().await?;
@@ -94,7 +100,10 @@ fn run_ci_container(
         }
 
         yield Event::Initialized(container.clone());
-        container.attach().await?.pipe_std();
+
+        if !verbosity.is_silent() {
+            container.attach().await?.pipe_std();
+        }
 
         {
             let events = hotplug.run();
@@ -108,28 +117,36 @@ fn run_ci_container(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default()
-            .filter_or("LOG", "off,container_ci_hotplug=debug")
-            .write_style_or("LOG_STYLE", "auto"),
-    )
-    .init();
-
     let args = Args::parse();
 
     match args.action {
         Action::Run {
+            verbosity,
+            log_format,
             root_device,
             symlink,
             docker_args,
         } => {
+            let log_env = env_logger::Env::default()
+                .filter_or("LOG", "off")
+                .write_style_or("LOG_STYLE", "auto");
+            
+            env_logger::Builder::from_env(log_env)
+                .filter_module("container_ci_hotplug", verbosity.log_level_filter())
+                .format_timestamp(if log_format.timestamp { Some(Default::default()) } else { None })
+                .format_module_path(log_format.path)
+                .format_target(log_format.module)
+                .format_level(log_format.level)
+                .init();
+
             let docker = Docker::connect_with_defaults()?;
             let container = docker.run(docker_args).await?;
             let _ = container.pipe_signals();
             let _guard = container.guard();
 
             let dev_path = root_device.device()?.syspath().to_owned();
-            let hotplug_stream = run_ci_container(root_device, symlink, container.clone());
+            let hotplug_stream =
+                run_ci_container(root_device, symlink, container.clone(), verbosity);
             let container_stream = {
                 let container = container.clone();
                 async_stream::try_stream! {

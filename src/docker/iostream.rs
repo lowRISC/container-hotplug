@@ -50,8 +50,10 @@ impl IoStream {
         let resize_stream = try_stream! {
             let mut stream = signal(SignalKind::window_change())?;
             loop {
-                let size = termsize::get().ok_or(io::Error::from_raw_os_error(libc::ENOTTY))?;
-                yield (size.rows, size.cols);
+                match termsize::get().ok_or(io::Error::from_raw_os_error(libc::ENOTTY)) {
+                    Ok(size) => yield (size.rows, size.cols),
+                    _ => {},
+                }
                 stream.recv().await;
             }
         };

@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
             let _ = container.pipe_signals();
             let _guard = container.guard();
 
-            let dev_path = root_device.device()?.syspath().to_owned();
+            let hub_path = root_device.hub()?.syspath().to_owned();
             let hotplug_stream =
                 run_ci_container(root_device, symlink, container.clone(), verbosity);
             let container_stream = {
@@ -164,9 +164,10 @@ async fn main() -> Result<()> {
                 let event = event?;
                 info!("{}", event);
                 match event {
-                    Event::Remove(dev) if dev.syspath() == dev_path => {
-                        info!("Root device detached. Stopping container.");
-                        container.remove(true).await?;
+                    Event::Remove(dev) if dev.syspath() == hub_path => {
+                        info!("Hub device detached. Stopping container.");
+                        container.kill(15).await.ok();
+                        container.remove(true).await.ok();
                     }
                     Event::Stopped(_, _) => {
                         break;

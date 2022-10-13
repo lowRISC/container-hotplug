@@ -1,11 +1,12 @@
 use std::default::Default;
-use std::time::Instant;
 
 use crate::cli::Timeout;
 
 use super::{IoStream, IoStreamSource};
 
 use anyhow::{anyhow, Context, Error, Result};
+use bollard::service::EventMessage;
+use futures::future::{BoxFuture, Shared};
 use tokio::io::AsyncWriteExt;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::{spawn, JoinHandle};
@@ -15,7 +16,7 @@ use tokio_stream::StreamExt;
 pub struct Container(
     pub(super) String,
     pub(super) bollard::Docker,
-    pub(super) Instant,
+    pub(super) Shared<BoxFuture<'static, Option<EventMessage>>>,
 );
 
 pub struct ContainerGuard(Option<Container>, Timeout);
@@ -38,29 +39,15 @@ impl Container {
     }
 
     pub async fn remove(&self, timeout: Timeout) -> Result<()> {
-        let ellapsed = Instant::now() - self.2;
-        let options = bollard::system::EventsOptions {
-            since: Some(format!("{}us", ellapsed.as_micros())),
-            filters: [
-                ("container", vec![self.0.as_str()]),
-                ("type", vec!["container"]),
-                ("event", vec!["destroy"]),
-            ]
-            .into(),
-            ..Default::default()
-        };
-        let mut events = self.1.events(Some(options));
         let options = bollard::container::RemoveContainerOptions {
             force: true,
             ..Default::default()
         };
         self.1.remove_container(&self.0, Some(options)).await.ok();
         if let Timeout::Some(duration) = timeout {
-            let events = events.timeout(duration);
-            tokio::pin!(events);
-            events.next().await;
+            tokio::time::timeout(duration, self.2.clone()).await.ok();
         } else {
-            events.next().await;
+            self.2.clone().await;
         }
         Ok(())
     }

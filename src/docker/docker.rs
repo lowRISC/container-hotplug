@@ -1,8 +1,11 @@
-use std::time::Instant;
-
 use super::Container;
 
 use anyhow::{ensure, Context, Result};
+use bollard::service::EventMessage;
+use futures::{
+    future::{BoxFuture, Shared},
+    FutureExt, StreamExt,
+};
 
 pub struct Docker(bollard::Docker);
 
@@ -13,10 +16,11 @@ impl Docker {
 
     pub async fn get_container<T: AsRef<str>>(&self, name: T) -> Result<Container> {
         let response = self.0.inspect_container(name.as_ref(), None).await?;
+        let id = response.id.context("Failed to obtain container ID")?;
         Ok(Container(
-            response.id.context("Failed to obtain container ID")?,
+            id.clone(),
             self.0.clone(),
-            Instant::now(),
+            container_removed_future(&self.0, id.clone()),
         ))
     }
 
@@ -42,4 +46,30 @@ impl Docker {
         let id = String::from_utf8(output.stdout)?;
         self.get_container(id.trim()).await
     }
+}
+
+fn container_removed_future(
+    docker: &bollard::Docker,
+    id: String,
+) -> Shared<BoxFuture<'static, Option<EventMessage>>> {
+    let options = bollard::system::EventsOptions {
+        filters: [
+            (String::from("container"), vec![id.clone()]),
+            (String::from("type"), vec![String::from("container")]),
+            (String::from("event"), vec![String::from("destroy")]),
+        ]
+        .into(),
+        ..Default::default()
+    };
+
+    let removed = docker
+        .events(Some(options))
+        .map(|evt| evt.ok())
+        .take(1)
+        .collect::<Vec<_>>()
+        .map(|vec| vec.into_iter().next().flatten())
+        .boxed()
+        .shared();
+
+    removed
 }

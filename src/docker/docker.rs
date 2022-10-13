@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use super::Container;
 
 use anyhow::{ensure, Context, Result};
@@ -14,6 +16,7 @@ impl Docker {
         Ok(Container(
             response.id.context("Failed to obtain container ID")?,
             self.0.clone(),
+            Instant::now(),
         ))
     }
 

@@ -2,7 +2,7 @@ mod cli;
 mod docker;
 mod hotplug;
 
-use cli::{Device, LogFormat, Symlink};
+use cli::{Device, LogFormat, Symlink, Timeout};
 use docker::{Container, Docker};
 use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
 
@@ -29,6 +29,8 @@ enum Action {
         verbosity: Verbosity<InfoLevel>,
         #[clap(short = 'L', long, default_value = "")]
         log_format: LogFormat,
+        #[clap(short = 't', long, default_value = "20s")]
+        remove_timeout: Timeout,
         #[arg(short = 'd', long)]
         root_device: Device,
         #[arg(short = 'l', long)]
@@ -124,6 +126,7 @@ async fn main() -> Result<ExitCode> {
         Action::Run {
             verbosity,
             log_format,
+            remove_timeout,
             root_device,
             symlink,
             docker_args,
@@ -146,8 +149,8 @@ async fn main() -> Result<ExitCode> {
 
             let docker = Docker::connect_with_defaults()?;
             let container = docker.run(docker_args).await?;
+            let _guard = container.guard(remove_timeout);
             let _ = container.pipe_signals();
-            let _guard = container.guard();
 
             let hub_path = root_device.hub()?.syspath().to_owned();
             let hotplug_stream =
@@ -172,6 +175,7 @@ async fn main() -> Result<ExitCode> {
                     Event::Remove(dev) if dev.syspath() == hub_path => {
                         info!("Hub device detached. Stopping container.");
                         status = ExitCode::from(5);
+                        container.kill(15).await?;
                         break;
                     }
                     Event::Stopped(_, _) => {
@@ -180,9 +184,6 @@ async fn main() -> Result<ExitCode> {
                     _ => {}
                 }
             }
-
-            container.kill(15).await.ok();
-            container.remove(true).await.ok();
         }
     };
 

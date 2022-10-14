@@ -1,4 +1,4 @@
-# container-ci-hotplug
+# container-hotplug
 
 Hot-plug (and unplug) devices into a Docker container as they are (un)plugged.
 
@@ -30,16 +30,16 @@ This program tries to provide a similar functionality for containers, allowing y
 Give a container access to all devices connected to the same hub as a CW310 board.
 
 1. Find the USB VID and PID of the device using `lsusb`, for a CW310 that is `2b3e:c310`
-2. Run (as root) the container using `container-ci-hotplug`:
+2. Run (as root) the container using `container-hotplug`:
 ```
-container-ci-hotplug run \
+container-hotplug run \
     -d parent-of:usb:2b3e:c310 \
     -- -it ubuntu:22.04 bash
 ```
 
 If you want symlinks to the `tty` devices created by interfaces 1 and 3 of the CW310, run:
 ```
-container-ci-hotplug run \
+container-hotplug run \
     -d parent-of:usb:2b3e:c310 \
     -l usb:2b3e:c310:1=/dev/ttyACM_CW310_0 \
     -l usb:2b3e:c310:3=/dev/ttyACM_CW310_1 \

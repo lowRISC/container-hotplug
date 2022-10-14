@@ -229,7 +229,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "container-ci-hotplug"
+name = "container-hotplug"
 version = "0.1.0"
 dependencies = [
  "anyhow",

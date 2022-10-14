@@ -117,8 +117,7 @@ fn run_ci_container(
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<ExitCode> {
+async fn hotplug_main() -> Result<ExitCode> {
     let args = Args::parse();
     let mut status = ExitCode::SUCCESS;
 
@@ -188,4 +187,15 @@ async fn main() -> Result<ExitCode> {
     };
 
     Ok(status)
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match hotplug_main().await {
+        Ok(code) => code,
+        Err(err) => {
+            let _ = eprintln!("Error: {err:?}");
+            ExitCode::FAILURE
+        }
+    }
 }

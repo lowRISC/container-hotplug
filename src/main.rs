@@ -17,7 +17,7 @@ use log::info;
 use crate::hotplug::PluggableDevice;
 
 #[derive(Parser)]
-#[command(max_term_width = 140)]
+#[command(max_term_width = 180)]
 struct Args {
     #[clap(subcommand)]
     action: Action,
@@ -28,29 +28,35 @@ enum Action {
     /// Wraps a call to `docker run` to allow hot-plugging devices into a
     /// container as they are plugged
     Run {
-        #[arg(short = 'd', long)]
-        /// Root hotplug device {n}
+        #[arg(short = 'd', long, id = "DEVICE")]
+        /// Root hotplug device: [[parent-of:]*]<PREFIX>:<DEVICE> {n}
+        /// PREFIX can be: {n}
+        ///  - usb: A USB device identified as <VID>[:<PID>[:<SERIAL>]] {n}
+        ///  - syspath: A directory path in /sys/** {n}
+        ///  - devnode: A device path in /dev/** {n}
         /// e.g., parent-of:usb:2b3e:c310
         root_device: Device,
 
-        #[arg(short = 'l', long)]
-        /// Create a symlink for a device {n}
+        #[arg(short = 'l', long, id = "SYMLINK")]
+        /// Create a symlink for a device: <PREFIX>:<DEVICE>=<PATH> {n}
+        /// PREFIX can be: {n}
+        ///  - usb: A USB device identified as <VID>:<PID>:<INTERFACE> {n}
         /// e.g., usb:2b3e:c310:1=/dev/ttyACM_CW310_0
         symlink: Vec<Symlink>,
 
-        #[clap(short = 'u', long, default_value = "5")]
+        #[clap(short = 'u', long, default_value = "5", id = "CODE")]
         /// Exit code to return when the root device is unplugged
-        root_unplugged_code: u8,
+        root_unplugged_exit_code: u8,
 
-        #[clap(short = 't', long, default_value = "20s")]
+        #[clap(short = 't', long, default_value = "20s", id = "TIMEOUT")]
         /// Timeout when waiting for the container to be removed
         remove_timeout: Timeout,
 
         #[clap(flatten)]
         verbosity: Verbosity<InfoLevel>,
 
-        #[clap(short = 'L', long, default_value = "+l-pmt")]
-        /// Log mesage format: ([+-][ltmp]*)+ {n}
+        #[clap(short = 'L', long, default_value = "+l-pmt", id = "FORMAT")]
+        /// Log mesage format: [[+-][ltmp]*]* {n}
         ///   +/-: enable/disable {n}
         ///   l: level {n}
         ///   t: timestamp {n}
@@ -58,7 +64,7 @@ enum Action {
         /// 
         log_format: LogFormat,
 
-        #[arg(trailing_var_arg = true)]
+        #[arg(trailing_var_arg = true, id = "ARGS")]
         /// Arguments to pass to `docker run`
         docker_args: Vec<String>,
     },
@@ -150,7 +156,7 @@ async fn hotplug_main() -> Result<ExitCode> {
             verbosity,
             log_format,
             remove_timeout,
-            root_unplugged_code,
+            root_unplugged_exit_code,
             root_device,
             symlink,
             docker_args,
@@ -202,12 +208,12 @@ async fn hotplug_main() -> Result<ExitCode> {
                 match event {
                     Event::Remove(dev) if dev.syspath() == hub_path => {
                         info!("Hub device detached. Stopping container.");
-                        status = ExitCode::from(root_unplugged_code);
+                        status = ExitCode::from(root_unplugged_exit_code);
                         container.kill(15).await?;
                         break;
                     }
                     Event::Stopped(_, code) => {
-                        if code >= 0 && code < 256 && (code as u8) != root_unplugged_code {
+                        if code >= 0 && code < 256 && (code as u8) != root_unplugged_exit_code {
                             status = ExitCode::from(code as u8);
                         } else {
                             status = ExitCode::FAILURE;

@@ -76,7 +76,7 @@ impl Display for Event {
     }
 }
 
-fn run_ci_container(
+fn run_hotplug(
     device: Device,
     symlinks: Vec<Symlink>,
     container: Container,
@@ -135,7 +135,7 @@ async fn hotplug_main() -> Result<ExitCode> {
                 .write_style_or("LOG_STYLE", "auto");
 
             env_logger::Builder::from_env(log_env)
-                .filter_module("container_ci_hotplug", verbosity.log_level_filter())
+                .filter_module("container_hotplug", verbosity.log_level_filter())
                 .format_timestamp(if log_format.timestamp {
                     Some(Default::default())
                 } else {
@@ -153,7 +153,7 @@ async fn hotplug_main() -> Result<ExitCode> {
 
             let hub_path = root_device.hub()?.syspath().to_owned();
             let hotplug_stream =
-                run_ci_container(root_device, symlink, container.clone(), verbosity);
+                run_hotplug(root_device, symlink, container.clone(), verbosity);
             let container_stream = {
                 let container = container.clone();
                 async_stream::try_stream! {

@@ -13,9 +13,9 @@ pub struct LogFormat {
 impl Default for LogFormat {
     fn default() -> Self {
         Self {
-            timestamp: true,
+            timestamp: false,
             path: false,
-            module: true,
+            module: false,
             level: true,
         }
     }

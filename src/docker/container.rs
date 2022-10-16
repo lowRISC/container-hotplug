@@ -25,7 +25,7 @@ impl Drop for ContainerGuard {
     fn drop(&mut self) {
         let container = self.0.take().unwrap();
         let timeout = self.1;
-        futures::executor::block_on(container.remove(timeout)).ok();
+        let _ = futures::executor::block_on(container.remove(timeout));
     }
 }
 
@@ -43,9 +43,9 @@ impl Container {
             force: true,
             ..Default::default()
         };
-        self.1.remove_container(&self.0, Some(options)).await.ok();
+        let _ = self.1.remove_container(&self.0, Some(options)).await;
         if let Timeout::Some(duration) = timeout {
-            tokio::time::timeout(duration, self.2.clone()).await.ok();
+            let _ = tokio::time::timeout(duration, self.2.clone()).await;
         } else {
             self.2.clone().await;
         }
@@ -246,7 +246,7 @@ impl Container {
 
         let container = self.clone();
         spawn(async move {
-            container.wait().await.ok();
+            let _ = container.wait().await;
             handle.abort();
             Ok::<(), Error>(())
         })

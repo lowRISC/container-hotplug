@@ -159,6 +159,10 @@ async fn hotplug_main() -> Result<ExitCode> {
                 .filter_or("LOG", "off")
                 .write_style_or("LOG_STYLE", "auto");
 
+            if !Path::new("/sys/fs/cgroup/devices/").is_dir() {
+                bail!("Could not find cgroup v1");
+            }
+
             env_logger::Builder::from_env(log_env)
                 .filter_module("container_hotplug", verbosity.log_level_filter())
                 .format_timestamp(if log_format.timestamp {

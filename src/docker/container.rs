@@ -39,6 +39,7 @@ impl Container {
     }
 
     pub async fn remove(&self, timeout: Timeout) -> Result<()> {
+        self.rename(format!("removing-{}", self.0)).await?;
         let options = bollard::container::RemoveContainerOptions {
             force: true,
             ..Default::default()
@@ -49,6 +50,14 @@ impl Container {
         } else {
             self.2.clone().await;
         }
+        Ok(())
+    }
+
+    pub async fn rename<U: AsRef<str>>(&self, name: U) -> Result<()> {
+        let required = bollard::container::RenameContainerOptions {
+            name: name.as_ref()
+        };        
+        self.1.rename_container(&self.0, required).await?;
         Ok(())
     }
 

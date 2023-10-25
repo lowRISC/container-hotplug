@@ -61,7 +61,7 @@ enum Action {
         ///   l: level {n}
         ///   t: timestamp {n}
         ///   m/p: module name/path {n}
-        /// 
+        ///
         log_format: LogFormat,
 
         #[arg(trailing_var_arg = true, id = "ARGS")]
@@ -187,8 +187,7 @@ async fn hotplug_main() -> Result<ExitCode> {
             let _ = container.pipe_signals();
 
             let hub_path = root_device.hub()?.syspath().to_owned();
-            let hotplug_stream =
-                run_hotplug(root_device, symlink, container.clone(), verbosity);
+            let hotplug_stream = run_hotplug(root_device, symlink, container.clone(), verbosity);
             let container_stream = {
                 let container = container.clone();
                 async_stream::try_stream! {

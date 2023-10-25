@@ -15,8 +15,12 @@ pub enum DeviceType {
     Devnode(PathBuf),
 }
 
+fn is_hex(val: &str) -> bool {
+    val.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn is_hex4(val: &str) -> bool {
-    val.len() == 4 && val.chars().all(|c| c.is_ascii_hexdigit())
+    val.len() == 4 && is_hex(val)
 }
 
 fn is_alphanum(val: &str) -> bool {
@@ -75,7 +79,13 @@ impl FromStr for Device {
 
                 let vid = vid.to_ascii_lowercase();
                 let pid = pid.map(|s| s.to_ascii_lowercase());
-                let serial = serial.map(|s| s.to_owned());
+                let serial = serial.map(|s| {
+                    if is_hex(s) {
+                        String::from_utf8(hex::decode(s).unwrap()).unwrap()
+                    } else {
+                        s.to_owned()
+                    }
+                });
 
                 DeviceType::Usb(vid, pid, serial)
             }

@@ -243,6 +243,7 @@ dependencies = [
  "env_logger",
  "futures",
  "futures-core",
+ "hex",
  "humantime",
  "libc",
  "log",

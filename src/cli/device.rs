@@ -2,7 +2,7 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::{anyhow, bail, ensure, Context, Error, Result};
+use anyhow::{bail, ensure, Context, Error, Result};
 use udev::Enumerator;
 
 #[derive(Clone)]
@@ -152,25 +152,25 @@ impl DeviceType {
                 enumerator
                     .scan_devices()?
                     .next()
-                    .context(anyhow!("Failed to find device `{self}`"))?
+                    .with_context(|| format!("Failed to find device `{self}`"))?
             }
             DeviceType::Syspath(path) => {
                 let path = path
                     .canonicalize()
-                    .context(anyhow!("Failed to resolve PATH for `{self}`"))?;
+                    .with_context(|| format!("Failed to resolve PATH for `{self}`"))?;
                 udev::Device::from_syspath(&path)
-                    .context(anyhow!("Failed to find device `{self}`"))?
+                    .with_context(|| format!("Failed to find device `{self}`"))?
             }
             DeviceType::Devnode(path) => {
                 let path = path
                     .canonicalize()
-                    .context(anyhow!("Failed to resolve PATH for `{self}`"))?;
+                    .with_context(|| format!("Failed to resolve PATH for `{self}`"))?;
                 let mut enumerator = Enumerator::new()?;
                 enumerator.match_property("DEVNAME", path)?;
                 enumerator
                     .scan_devices()?
                     .next()
-                    .context(anyhow!("Failed to find device `{self}`"))?
+                    .with_context(|| format!("Failed to find device `{self}`"))?
             }
         };
         Ok(dev)
@@ -186,9 +186,9 @@ impl Device {
     pub fn hub(&self) -> Result<udev::Device> {
         let mut device = self.device()?;
         for _ in 0..self.0 {
-            device = device.parent().context(anyhow!(
-                "Failed to obtain parent device while resolving `{self}`"
-            ))?;
+            device = device.parent().with_context(|| {
+                format!("Failed to obtain parent device while resolving `{self}`")
+            })?;
         }
         Ok(device)
     }

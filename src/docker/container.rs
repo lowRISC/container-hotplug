@@ -2,7 +2,7 @@ use crate::cli::Timeout;
 
 use super::{IoStream, IoStreamSource};
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, ensure, Context, Error, Result};
 use bollard::service::EventMessage;
 use futures::future::{BoxFuture, Shared};
 use tokio::io::AsyncWriteExt;
@@ -140,7 +140,7 @@ impl Container {
             last = Some(wait_response?);
         }
 
-        anyhow::ensure!(last.is_some(), "Unexpected exit status");
+        ensure!(last.is_some(), "Unexpected exit status");
 
         Ok(last.unwrap().status_code)
     }

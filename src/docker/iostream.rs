@@ -137,7 +137,7 @@ impl IoStream {
 
         tokio::spawn(async move {
             tokio::pin!(stream);
-            let _ = stream.all(|_: Result<(), anyhow::Error>| true).await;
+            let _ = stream.all(|_: Result<()>| true).await;
         })
     }
 }

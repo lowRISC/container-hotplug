@@ -11,11 +11,11 @@ use tokio::task::{spawn, JoinHandle};
 use tokio_stream::StreamExt;
 
 #[derive(Clone)]
-pub struct Container(
-    pub(super) String,
-    pub(super) bollard::Docker,
-    pub(super) Shared<BoxFuture<'static, Option<EventMessage>>>,
-);
+pub struct Container {
+    pub(super) id: String,
+    pub(super) docker: bollard::Docker,
+    pub(super) remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
+}
 
 pub struct ContainerGuard(Option<Container>, Timeout);
 
@@ -29,7 +29,7 @@ impl Drop for ContainerGuard {
 
 impl Container {
     pub fn id(&self) -> &str {
-        &self.0
+        &self.id
     }
 
     pub fn guard(&self, timeout: Timeout) -> ContainerGuard {
@@ -37,16 +37,16 @@ impl Container {
     }
 
     pub async fn remove(&self, timeout: Timeout) -> Result<()> {
-        self.rename(format!("removing-{}", self.0)).await?;
+        self.rename(format!("removing-{}", self.id)).await?;
         let options = bollard::container::RemoveContainerOptions {
             force: true,
             ..Default::default()
         };
-        let _ = self.1.remove_container(&self.0, Some(options)).await;
+        let _ = self.docker.remove_container(&self.id, Some(options)).await;
         if let Timeout::Some(duration) = timeout {
-            let _ = tokio::time::timeout(duration, self.2.clone()).await;
+            let _ = tokio::time::timeout(duration, self.remove_event.clone()).await;
         } else {
-            self.2.clone().await;
+            self.remove_event.clone().await;
         }
         Ok(())
     }
@@ -55,7 +55,7 @@ impl Container {
         let required = bollard::container::RenameContainerOptions {
             name: name.as_ref(),
         };
-        self.1.rename_container(&self.0, required).await?;
+        self.docker.rename_container(&self.id, required).await?;
         Ok(())
     }
 
@@ -70,21 +70,21 @@ impl Container {
             detach_keys: Some("ctrl-c".to_string()),
             ..Default::default()
         };
-        let response = self.1.create_exec::<String>(&self.0, options).await?;
+        let response = self.docker.create_exec::<String>(&self.id, options).await?;
         let id = response.id;
 
         let options = bollard::exec::StartExecOptions {
             detach: false,
             ..Default::default()
         };
-        let response = self.1.start_exec(&id, Some(options)).await?;
+        let response = self.docker.start_exec(&id, Some(options)).await?;
 
         if let bollard::exec::StartExecResults::Attached { input, output } = response {
             return Ok(IoStream {
                 output,
                 input,
                 source: IoStreamSource::Exec(id),
-                docker: self.1.clone(),
+                docker: self.docker.clone(),
             });
         }
 
@@ -101,18 +101,24 @@ impl Container {
             ..Default::default()
         };
 
-        let response = self.1.attach_container(&self.0, Some(options)).await?;
+        let response = self
+            .docker
+            .attach_container(&self.id, Some(options))
+            .await?;
 
         Ok(IoStream {
             output: response.output,
             input: response.input,
-            source: IoStreamSource::Container(self.0.clone()),
-            docker: self.1.clone(),
+            source: IoStreamSource::Container(self.id.clone()),
+            docker: self.docker.clone(),
         })
     }
 
     async fn inspect(&self) -> Result<bollard::models::ContainerInspectResponse> {
-        Ok(self.1.inspect_container(self.0.as_ref(), None).await?)
+        Ok(self
+            .docker
+            .inspect_container(self.id.as_ref(), None)
+            .await?)
     }
 
     pub async fn name(&self) -> Result<String> {
@@ -125,7 +131,7 @@ impl Container {
         let options = bollard::container::KillContainerOptions {
             signal: format!("{}", signal),
         };
-        self.1.kill_container(&self.0, Some(options)).await?;
+        self.docker.kill_container(&self.id, Some(options)).await?;
         Ok(())
     }
 
@@ -133,7 +139,7 @@ impl Container {
         let options = bollard::container::WaitContainerOptions {
             condition: "not-running",
         };
-        let mut response = self.1.wait_container(self.0.as_str(), Some(options));
+        let mut response = self.docker.wait_container(self.id.as_str(), Some(options));
 
         let mut last = None;
         while let Some(wait_response) = response.next().await {
@@ -222,10 +228,10 @@ impl Container {
             permissions.push('m');
         }
 
-        deny_device_cgroup1(&self.0, major, minor, "rwm").await?;
+        deny_device_cgroup1(&self.id, major, minor, "rwm").await?;
 
         if permissions != "" {
-            allow_device_cgroup1(&self.0, major, minor, permissions.as_ref()).await?;
+            allow_device_cgroup1(&self.id, major, minor, permissions.as_ref()).await?;
         }
 
         Ok(())

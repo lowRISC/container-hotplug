@@ -17,11 +17,11 @@ impl Docker {
     pub async fn get_container<T: AsRef<str>>(&self, name: T) -> Result<Container> {
         let response = self.0.inspect_container(name.as_ref(), None).await?;
         let id = response.id.context("Failed to obtain container ID")?;
-        Ok(Container(
-            id.clone(),
-            self.0.clone(),
-            container_removed_future(&self.0, id.clone()),
-        ))
+        Ok(Container {
+            id: id.clone(),
+            docker: self.0.clone(),
+            remove_event: container_removed_future(&self.0, id.clone()),
+        })
     }
 
     pub async fn run<U: AsRef<str>, T: AsRef<[U]>>(&self, args: T) -> Result<Container> {

@@ -53,8 +53,8 @@ impl Container {
 
     pub async fn rename<U: AsRef<str>>(&self, name: U) -> Result<()> {
         let required = bollard::container::RenameContainerOptions {
-            name: name.as_ref()
-        };        
+            name: name.as_ref(),
+        };
         self.1.rename_container(&self.0, required).await?;
         Ok(())
     }

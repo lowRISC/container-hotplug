@@ -6,10 +6,10 @@ use cli::{Device, LogFormat, Symlink, Timeout};
 use docker::{Container, Docker};
 use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
 
-use std::{fmt::Display, process::ExitCode, path::Path};
+use std::{fmt::Display, path::Path, process::ExitCode};
 use tokio_stream::StreamExt;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use clap_verbosity_flag::{InfoLevel, LogLevel, Verbosity};
 use log::info;
@@ -61,7 +61,7 @@ enum Action {
         ///   l: level {n}
         ///   t: timestamp {n}
         ///   m/p: module name/path {n}
-        /// 
+        ///
         log_format: LogFormat,
 
         #[arg(trailing_var_arg = true, id = "ARGS")]
@@ -187,8 +187,7 @@ async fn hotplug_main() -> Result<ExitCode> {
             let _ = container.pipe_signals();
 
             let hub_path = root_device.hub()?.syspath().to_owned();
-            let hotplug_stream =
-                run_hotplug(root_device, symlink, container.clone(), verbosity);
+            let hotplug_stream = run_hotplug(root_device, symlink, container.clone(), verbosity);
             let container_stream = {
                 let container = container.clone();
                 async_stream::try_stream! {

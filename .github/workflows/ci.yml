@@ -9,10 +9,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependency
+      - name: Install apt dependency
         run: |
             sudo apt-get update
             sudo apt-get install -y libudev-dev
+
+      # Need to use nightly toolchain for eBPF
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install bpf-linker
+        run: |
+          cargo install bpf-linker
 
       - name: Build
         run: cargo build --release

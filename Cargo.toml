@@ -30,3 +30,10 @@ bollard = "0.16"
 futures = "0.3"
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 bitflags = "2"
+
+[build-dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+walkdir = "2"
+
+[workspace]
+exclude = ["cgroup_device_filter"]

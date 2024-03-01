@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 log = "0.4"
-env_logger = "0.9"
+env_logger = "0.11"
 clap = { version = "4", features = ["default", "derive", "unicode", "wrap_help"] }
 clap-verbosity-flag = "2"
 humantime = "2"
@@ -17,7 +17,7 @@ libc = "0.2"
 bytes = "1"
 raw_tty = "0.1"
 atty = "0.2"
-usb-ids = "0.2"
+usb-ids = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["full"] }
@@ -28,5 +28,5 @@ termsize = "0.1"
 unescape = "0.1"
 futures-core = "0.3"
 udev = { git="https://github.com/jprendes/udev-rs.git", features = ["send"] }
-bollard = "0.13"
+bollard = "0.15"
 futures = "0.3"

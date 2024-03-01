@@ -1,5 +1,3 @@
-use std::default::Default;
-
 use crate::cli::Timeout;
 
 use super::{IoStream, IoStreamSource};

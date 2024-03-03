@@ -49,8 +49,8 @@ impl IoStream {
         let resize_stream = try_stream! {
             let mut stream = signal(SignalKind::window_change())?;
             loop {
-                match termsize::get() {
-                    Some(size) => yield (size.rows, size.cols),
+                match rustix::termios::tcgetwinsize(rustix::stdio::stdout()) {
+                    Ok(size) => yield (size.ws_row, size.ws_col),
                     _ => {},
                 }
                 stream.recv().await;

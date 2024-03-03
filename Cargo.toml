@@ -30,6 +30,7 @@ bollard = "0.16"
 futures = "0.3"
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 bitflags = "2"
+aya = { git = "https://github.com/aya-rs/aya.git" }
 
 [build-dependencies]
 anyhow = { version = "1", features = ["backtrace"] }

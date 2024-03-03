@@ -1,4 +1,8 @@
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
+use aya::maps::{HashMap, MapData};
+use aya::programs::{CgroupDevice, Link};
+use std::fs::File;
+use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 
 // The numerical representation below needs to match BPF_DEVCG constants.
@@ -26,6 +30,10 @@ pub trait DeviceAccessController {
         minor: u32,
         access: Access,
     ) -> Result<()>;
+
+    /// Stop performing access control. This may allow all accesses, so should only be used when
+    /// the cgroup is shutdown.
+    fn stop(self: Box<Self>) -> Result<()>;
 }
 
 pub struct DeviceAccessControllerV1 {
@@ -94,6 +102,97 @@ impl DeviceAccessController for DeviceAccessControllerV1 {
             )?;
         }
 
+        Ok(())
+    }
+
+    fn stop(self: Box<Self>) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[repr(C)] // This is read as POD by the BPF program.
+#[derive(Clone, Copy)]
+struct Device {
+    device_type: u32,
+    major: u32,
+    minor: u32,
+}
+
+// SAFETY: Device is `repr(C)`` and has no padding.
+unsafe impl aya::Pod for Device {}
+
+pub struct DeviceAccessControllerV2 {
+    map: HashMap<MapData, Device, u32>,
+    pin: PathBuf,
+}
+
+impl DeviceAccessControllerV2 {
+    pub fn new(id: &str) -> Result<Self> {
+        // We want to take control of the device cgroup filtering from docker. To do this, we attach our own
+        // filter program and detach the one by docker.
+        let cgroup_path = format!("/sys/fs/cgroup/system.slice/docker-{id}.scope");
+        let cgroup = File::open(cgroup_path)?;
+
+        let mut bpf = aya::Bpf::load(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/cgroup_device_filter/target/bpfel-unknown-none/release/cgroup_device_filter"
+        )))?;
+
+        let program: &mut CgroupDevice = bpf
+            .program_mut("check_device")
+            .context("cannot find check_device program")?
+            .try_into()?;
+
+        program.load()?;
+
+        // Iterate existing programs. We'll need to detach them later.
+        // Wrap this inside `ManuallyDrop` to prevent accidental detaching.
+        let existing_programs = ManuallyDrop::new(CgroupDevice::query(&cgroup)?);
+
+        program.attach(&cgroup)?;
+
+        // Pin the program so that if container-hotplug accidentally exits, the filter won't be removed from the docker
+        // container.
+        let pin: PathBuf = format!("/sys/fs/bpf/docker-{id}-device-filter").into();
+        program.pin(&pin)?;
+
+        // Now our new filter is attached, detach all docker filters.
+        for existing_program in ManuallyDrop::into_inner(existing_programs) {
+            existing_program.detach()?;
+        }
+
+        let map: HashMap<_, Device, u32> = bpf
+            .take_map("DEVICE_PERM")
+            .context("cannot find DEVICE_PERM map")?
+            .try_into()?;
+
+        Ok(Self { map, pin })
+    }
+}
+
+impl DeviceAccessController for DeviceAccessControllerV2 {
+    fn set_permission(
+        &mut self,
+        ty: DeviceType,
+        major: u32,
+        minor: u32,
+        access: Access,
+    ) -> Result<()> {
+        let device = Device {
+            device_type: ty as u32,
+            major,
+            minor,
+        };
+        if access.is_empty() {
+            self.map.remove(&device)?;
+        } else {
+            self.map.insert(device, access.bits(), 0)?;
+        }
+        Ok(())
+    }
+
+    fn stop(self: Box<Self>) -> Result<()> {
+        CgroupDevice::from_pin(&self.pin)?.unpin()?;
         Ok(())
     }
 }

@@ -10,7 +10,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::{spawn, JoinHandle};
 use tokio_stream::StreamExt;
 
-use super::cgroup::{Access, DeviceAccessController, DeviceAccessControllerV1, DeviceType};
+use super::cgroup::{Access, DeviceAccessController, DeviceAccessControllerV1, DeviceAccessControllerV2, DeviceType};
 use super::{IoStream, IoStreamSource};
 
 #[derive(Clone)]
@@ -18,7 +18,7 @@ pub struct Container {
     id: String,
     docker: bollard::Docker,
     remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
-    cgroup_device_filter: Arc<Mutex<Box<dyn DeviceAccessController + Send>>>,
+    cgroup_device_filter: Arc<Mutex<Option<Box<dyn DeviceAccessController + Send>>>>,
 }
 
 impl Container {
@@ -40,13 +40,19 @@ impl Container {
             .shared();
 
         let cgroup_device_filter: Box<dyn DeviceAccessController + Send> =
-            Box::new(DeviceAccessControllerV1::new(id)?);
+            match DeviceAccessControllerV2::new(id) {
+                Ok(v) => Box::new(v),
+                Err(err) => match DeviceAccessControllerV1::new(id) {
+                    Ok(v) => Box::new(v),
+                    Err(_) => Err(err).context("neither cgroup v1 and cgroup v2 works")?,
+                },
+            };
 
         Ok(Self {
             id: id.to_owned(),
             docker: docker.clone(),
             remove_event: remove_evevnt,
-            cgroup_device_filter: Arc::new(Mutex::new(cgroup_device_filter)),
+            cgroup_device_filter: Arc::new(Mutex::new(Some(cgroup_device_filter))),
         })
     }
 
@@ -82,6 +88,14 @@ impl Container {
                 .await
                 .context("no destroy event")?;
         }
+
+        // Stop the cgroup device filter. Only do so once we're sure that the container is removed.
+        self.cgroup_device_filter
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .stop()?;
 
         Ok(())
     }
@@ -229,7 +243,7 @@ impl Container {
         let controller = self.cgroup_device_filter.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut controller = controller.lock().unwrap();
-            controller.set_permission(
+            controller.as_mut().unwrap().set_permission(
                 DeviceType::Character,
                 major,
                 minor,

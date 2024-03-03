@@ -25,10 +25,7 @@ Another concern is providing a container with well known paths for the devices.
 On bare-metal systems this would usually be achieved with a `SYMLINK` directive in a udev rule.
 This program tries to provide a similar functionality for containers, allowing you to specify symlinks for certain devices.
 
-## Limitations
-
-`container-hotplug` needs to be run as root and relies on `cgroup v1`. It does not support `cgroup v2`.
-On distributions with `cgroup v2`, you can switch back to `cgroup v1` by setting the [kernel parameter](https://wiki.ubuntu.com/Kernel/KernelBootParameters) `systemd.unified_cgroup_hierarchy=0`.
+This tool supports both cgroup v1 and v2.
 
 ## Example
 

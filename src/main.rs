@@ -7,11 +7,11 @@ use cli::{Action, Device, Symlink};
 use docker::{Container, Docker};
 use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
 
+use std::fmt::Display;
 use std::pin::pin;
-use std::{fmt::Display, path::Path};
 use tokio_stream::StreamExt;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::Parser;
 use clap_verbosity_flag::{InfoLevel, LogLevel, Verbosity};
 use log::info;
@@ -97,10 +97,6 @@ fn run_hotplug(
 
 async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
     let mut status = 0;
-
-    if !Path::new("/sys/fs/cgroup/devices/").is_dir() {
-        bail!("Could not find cgroup v1");
-    }
 
     let docker = Docker::connect_with_defaults()?;
     let container = docker.run(param.docker_args).await?;

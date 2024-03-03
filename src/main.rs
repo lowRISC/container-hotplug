@@ -20,7 +20,7 @@ use crate::hotplug::PluggableDevice;
 #[derive(Parser)]
 #[command(max_term_width = 180)]
 struct Args {
-    #[clap(subcommand)]
+    #[command(subcommand)]
     action: Action,
 }
 
@@ -45,18 +45,18 @@ enum Action {
         /// e.g., usb:2b3e:c310:1=/dev/ttyACM_CW310_0
         symlink: Vec<Symlink>,
 
-        #[clap(short = 'u', long, default_value = "5", id = "CODE")]
+        #[arg(short = 'u', long, default_value = "5", id = "CODE")]
         /// Exit code to return when the root device is unplugged
         root_unplugged_exit_code: u8,
 
-        #[clap(short = 't', long, default_value = "20s", id = "TIMEOUT")]
+        #[arg(short = 't', long, default_value = "20s", id = "TIMEOUT")]
         /// Timeout when waiting for the container to be removed
         remove_timeout: Timeout,
 
-        #[clap(flatten)]
+        #[command(flatten)]
         verbosity: Verbosity<InfoLevel>,
 
-        #[clap(short = 'L', long, default_value = "+l-pmt", id = "FORMAT")]
+        #[arg(short = 'L', long, default_value = "+l-pmt", id = "FORMAT")]
         /// Log mesage format: [[+-][ltmp]*]* {n}
         ///   +/-: enable/disable {n}
         ///   l: level {n}

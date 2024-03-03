@@ -13,21 +13,15 @@ env_logger = "0.11"
 clap = { version = "4", features = ["default", "derive", "unicode", "wrap_help"] }
 clap-verbosity-flag = "2"
 humantime = "2"
-libc = "0.2"
 bytes = "1"
-raw_tty = "0.1"
-atty = "0.2"
 usb-ids = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["full"] }
-tokio-fd = "0.3"
 async-stream = "0.3"
-async-trait = "0.1"
 termsize = "0.1"
 unescape = "0.1"
-futures-core = "0.3"
 udev = "0.8"
 bollard = "0.15"
 futures = "0.3"
-rustix = { version = "0.38", features = ["fs", "stdio"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }

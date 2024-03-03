@@ -1,6 +1,7 @@
 mod cli;
 mod docker;
 mod hotplug;
+mod util;
 
 use cli::{Device, LogFormat, Symlink, Timeout};
 use docker::{Container, Docker};

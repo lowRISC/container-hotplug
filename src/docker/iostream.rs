@@ -3,11 +3,10 @@ use async_stream::try_stream;
 use bollard::container::LogOutput;
 use bollard::errors::Error;
 use bytes::Bytes;
-use raw_tty::GuardMode;
 use std::future::pending;
 use std::io;
 use std::pin::Pin;
-use tokio::io::{sink, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinHandle;
 use tokio_stream::{empty, Stream, StreamExt};
@@ -120,12 +119,15 @@ impl IoStream {
                     }
                     StreamData::StdIn(mut buf) => {
                         input.write_all_buf(&mut buf).await?;
+                        input.flush().await?;
                     }
                     StreamData::StdOut(mut buf) => {
                         stdout.write_all_buf(&mut buf).await?;
+                        stdout.flush().await?;
                     }
                     StreamData::StdErr(mut buf) => {
                         stderr.write_all_buf(&mut buf).await?;
+                        stdout.flush().await?;
                     }
                     StreamData::Stop => {
                         break
@@ -154,14 +156,12 @@ fn stdin() -> Pin<Box<dyn tokio::io::AsyncRead + Send>> {
 }
 
 fn try_stdin() -> Result<Pin<Box<dyn AsyncRead + Send>>> {
-    let mut stdin = tokio_fd::AsyncFd::try_from(rustix::stdio::raw_stdin())?.guard_mode()?;
-    stdin.modify_mode(|mut t| {
-        use libc::*;
-        t.c_iflag &= !(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
-        t.c_lflag &= !(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-        t.c_cflag &= !(CSIZE | PARENB);
-        t.c_cflag |= CS8;
-        t
+    let mut stdin = crate::util::tty_mode_guard::TtyModeGuard::new(tokio::io::stdin(), |mode| {
+        // Switch input to raw mode, but don't touch output modes (as it can also be connected
+        // to stdout and stderr).
+        let outmode = mode.output_modes;
+        mode.make_raw();
+        mode.output_modes = outmode;
     })?;
     let stream = async_stream::stream! {
         loop {
@@ -176,17 +176,11 @@ fn try_stdin() -> Result<Pin<Box<dyn AsyncRead + Send>>> {
 }
 
 fn stdout() -> Pin<Box<dyn tokio::io::AsyncWrite + Send>> {
-    match tokio_fd::AsyncFd::try_from(rustix::stdio::raw_stdout()) {
-        Ok(stdout) => Box::pin(stdout),
-        Err(_) => Box::pin(sink()),
-    }
+    Box::pin(tokio::io::stdout())
 }
 
 fn stderr() -> Pin<Box<dyn tokio::io::AsyncWrite + Send>> {
-    match tokio_fd::AsyncFd::try_from(rustix::stdio::raw_stderr()) {
-        Ok(stdout) => Box::pin(stdout),
-        Err(_) => Box::pin(sink()),
-    }
+    Box::pin(tokio::io::stderr())
 }
 
 async fn resize_tty(

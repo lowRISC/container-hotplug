@@ -323,6 +323,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "bitflags 2.4.2",
  "bollard",
  "bytes",
  "clap",

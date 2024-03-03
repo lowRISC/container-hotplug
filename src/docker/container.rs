@@ -1,22 +1,24 @@
 use std::pin::pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-use super::{IoStream, IoStreamSource};
 
 use anyhow::{anyhow, Context, Error, Result};
 use bollard::service::EventMessage;
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt;
-use tokio::io::AsyncWriteExt;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::{spawn, JoinHandle};
 use tokio_stream::StreamExt;
+
+use super::cgroup::{Access, DeviceAccessController, DeviceAccessControllerV1, DeviceType};
+use super::{IoStream, IoStreamSource};
 
 #[derive(Clone)]
 pub struct Container {
     id: String,
     docker: bollard::Docker,
     remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
+    cgroup_device_filter: Arc<Mutex<Box<dyn DeviceAccessController + Send>>>,
 }
 
 impl Container {
@@ -37,10 +39,14 @@ impl Container {
             .boxed()
             .shared();
 
+        let cgroup_device_filter: Box<dyn DeviceAccessController + Send> =
+            Box::new(DeviceAccessControllerV1::new(id)?);
+
         Ok(Self {
             id: id.to_owned(),
             docker: docker.clone(),
             remove_event: remove_evevnt,
+            cgroup_device_filter: Arc::new(Mutex::new(cgroup_device_filter)),
         })
     }
 
@@ -76,6 +82,7 @@ impl Container {
                 .await
                 .context("no destroy event")?;
         }
+
         Ok(())
     }
 
@@ -219,24 +226,21 @@ impl Container {
         (major, minor): (u32, u32),
         (r, w, m): (bool, bool, bool),
     ) -> Result<()> {
-        let mut permissions = String::new();
-        if r {
-            permissions.push('r');
-        }
-        if w {
-            permissions.push('w');
-        }
-        if m {
-            permissions.push('m');
-        }
+        let controller = self.cgroup_device_filter.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut controller = controller.lock().unwrap();
+            controller.set_permission(
+                DeviceType::Character,
+                major,
+                minor,
+                if r { Access::READ } else { Access::empty() }
+                    | if w { Access::WRITE } else { Access::empty() }
+                    | if m { Access::MKNOD } else { Access::empty() },
+            )?;
 
-        deny_device_cgroup1(&self.id, major, minor, "rwm").await?;
-
-        if permissions != "" {
-            allow_device_cgroup1(&self.id, major, minor, permissions.as_ref()).await?;
-        }
-
-        Ok(())
+            Ok(())
+        })
+        .await?
     }
 
     pub async fn pipe_signals(&self) -> JoinHandle<Result<()>> {
@@ -268,32 +272,6 @@ impl Container {
             Ok(())
         })
     }
-}
-
-async fn allow_device_cgroup1(
-    container_id: &str,
-    major: u32,
-    minor: u32,
-    permissions: &str,
-) -> Result<()> {
-    let path = format!("/sys/fs/cgroup/devices/docker/{container_id}/devices.allow");
-    let mut file = tokio::fs::OpenOptions::new().write(true).open(path).await?;
-    let mut data = bytes::Bytes::from(format!("c {major}:{minor} {permissions}"));
-    file.write_all_buf(&mut data).await?;
-    Ok(())
-}
-
-async fn deny_device_cgroup1(
-    container_id: &str,
-    major: u32,
-    minor: u32,
-    permissions: &str,
-) -> Result<()> {
-    let path = format!("/sys/fs/cgroup/devices/docker/{container_id}/devices.deny");
-    let mut file = tokio::fs::OpenOptions::new().write(true).open(path).await?;
-    let mut data = bytes::Bytes::from(format!("c {major}:{minor} {permissions}"));
-    file.write_all_buf(&mut data).await?;
-    Ok(())
 }
 
 fn signal_stream(kind: SignalKind) -> impl tokio_stream::Stream<Item = Result<SignalKind>> {

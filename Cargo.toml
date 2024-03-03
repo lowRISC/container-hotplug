@@ -10,7 +10,12 @@ license = "MIT OR Apache-2.0"
 anyhow = { version = "1", features = ["backtrace"] }
 log = "0.4"
 env_logger = "0.11"
-clap = { version = "4", features = ["default", "derive", "unicode", "wrap_help"] }
+clap = { version = "4", features = [
+    "default",
+    "derive",
+    "unicode",
+    "wrap_help",
+] }
 clap-verbosity-flag = "2"
 humantime = "2"
 bytes = "1"
@@ -24,3 +29,4 @@ udev = "0.8"
 bollard = "0.16"
 futures = "0.3"
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+bitflags = "2"

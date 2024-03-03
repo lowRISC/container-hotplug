@@ -21,6 +21,6 @@ tokio-util = { version = "0.7", features = ["full"] }
 async-stream = "0.3"
 unescape = "0.1"
 udev = "0.8"
-bollard = "0.15"
+bollard = "0.16"
 futures = "0.3"
 rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }

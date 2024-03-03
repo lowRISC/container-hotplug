@@ -91,7 +91,7 @@ impl FromStr for Device {
             "devnode" => {
                 let path = PathBuf::from(&dev);
                 ensure!(
-                    path.is_absolute() && path.starts_with("/sys") && !dev.ends_with("/"),
+                    path.is_absolute() && path.starts_with("/dev") && !dev.ends_with("/"),
                     "Devnode device PATH should be a file path in /dev/**"
                 );
 

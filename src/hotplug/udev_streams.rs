@@ -32,7 +32,7 @@ pub fn monitor(hub_path: PathBuf) -> impl tokio_stream::Stream<Item = Result<Ude
         let mut async_fd = tokio::io::unix::AsyncFd::new(socket)?;
         loop {
             let mut guard = async_fd.readable_mut().await?;
-            if let Ok(Ok(event)) = guard.try_io(|socket| socket.get_mut().next().ok_or(WouldBlock.into())) {
+            if let Ok(Ok(event)) = guard.try_io(|socket| socket.get_ref().iter().next().ok_or_else(|| WouldBlock.into())) {
                 match event.event_type() {
                     EventType::Add if event.syspath().starts_with(&hub_path) => {
                         if let Some(device) = PluggableDevice::from_device(event.deref()) {

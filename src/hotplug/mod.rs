@@ -8,7 +8,7 @@ use crate::docker::Container;
 use async_stream::try_stream;
 
 use anyhow::Result;
-use futures_core::stream::BoxStream;
+use futures::stream::LocalBoxStream;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,7 +33,7 @@ pub struct HotPlug {
     pub device: PluggableDevice,
     pub hub_path: PathBuf,
     symlinks: Vec<cli::Symlink>,
-    monitor: BoxStream<'static, Result<UdevEvent>>,
+    monitor: LocalBoxStream<'static, Result<UdevEvent>>,
     devices: HashMap<PathBuf, PluggedDevice>,
 }
 

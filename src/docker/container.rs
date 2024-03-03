@@ -2,7 +2,7 @@ use crate::cli::Timeout;
 
 use super::{IoStream, IoStreamSource};
 
-use anyhow::{anyhow, ensure, Context, Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use bollard::service::EventMessage;
 use futures::future::{BoxFuture, Shared};
 use tokio::io::AsyncWriteExt;
@@ -139,16 +139,21 @@ impl Container {
         let options = bollard::container::WaitContainerOptions {
             condition: "not-running",
         };
-        let mut response = self.docker.wait_container(self.id.as_str(), Some(options));
 
-        let mut last = None;
-        while let Some(wait_response) = response.next().await {
-            last = Some(wait_response?);
+        let response = self
+            .docker
+            .wait_container(self.id.as_str(), Some(options))
+            .next()
+            .await
+            .context("No response received for wait")?;
+
+        match response {
+            Ok(response) => Ok(response.status_code),
+            // If the container does not complete, e.g. it's killed, then we will receive
+            // an error code through docker.
+            Err(bollard::errors::Error::DockerContainerWaitError { error: _, code }) => Ok(code),
+            Err(err) => Err(err)?,
         }
-
-        ensure!(last.is_some(), "Unexpected exit status");
-
-        Ok(last.unwrap().status_code)
     }
 
     pub async fn mkdir<T: AsRef<std::path::Path>>(&self, path: T) -> Result<()> {

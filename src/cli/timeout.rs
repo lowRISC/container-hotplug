@@ -9,9 +9,9 @@ pub enum Timeout {
 impl FromStr for Timeout {
     type Err = humantime::DurationError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "inf" || s == "infinite" || s == "none" || s == "forever" {
-            return Ok(Timeout::Infinite);
-        }
-        Ok(Timeout::Some(humantime::parse_duration(s)?))
+        Ok(match s {
+            "inf" | "infinite" | "none" | "forever" => Timeout::Infinite,
+            _ => Timeout::Some(humantime::parse_duration(s)?),
+        })
     }
 }

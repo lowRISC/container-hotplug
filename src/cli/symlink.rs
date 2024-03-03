@@ -5,25 +5,27 @@ use anyhow::{bail, ensure, Error, Result};
 
 #[derive(Clone)]
 pub enum SymlinkDevice {
-    Usb(String, String, String),
+    Usb {
+        vid: String,
+        pid: String,
+        if_num: String,
+    },
 }
 
 #[derive(Clone)]
-pub struct Symlink(SymlinkDevice, PathBuf);
+pub struct Symlink {
+    device: SymlinkDevice,
+    path: PathBuf,
+}
 
 fn is_hex4(val: &str) -> bool {
     val.len() == 4 && val.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn is_number(val: &str) -> bool {
-    val.len() >= 1 && val.chars().all(|c| c.is_ascii_digit())
-}
-
 impl FromStr for Symlink {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<_> = s.split("=").collect();
-
+        let parts: Vec<_> = s.split('=').collect();
         ensure!(
             parts.len() == 2,
             "Symlink format should be `<PREFIX>:<DEVICE>=<PATH>`, found `{s}`"
@@ -33,24 +35,24 @@ impl FromStr for Symlink {
         let path = parts[1];
 
         ensure!(
-            path.starts_with("/") && !path.ends_with("/"),
+            path.starts_with('/') && !path.ends_with('/'),
             "Symlink PATH should be an absolute file path, found `{path}`."
         );
 
         let path = PathBuf::from(path);
 
-        let mut parts = dev.split(":");
-        let prefix = parts.next().unwrap();
-        let parts: Vec<_> = parts.collect();
-        let dev = parts.join(":");
+        let Some((kind, dev)) = s.split_once(':') else {
+            bail!("Symlink DEVICE format should be `<PREFIX>:<DEVICE>`, found `{dev}`");
+        };
 
-        match prefix {
+        match kind {
             "usb" => {
+                let parts: Vec<_> = dev.split(':').collect();
                 ensure!(parts.len() == 3, "Symlink DEVICE format for usb should be `<VID>:<PID>:<INTERFACE>`, found `{dev}`.");
 
                 let vid = parts[0];
                 let pid = parts[1];
-                let ifc = parts[2];
+                let if_num = parts[2];
 
                 ensure!(
                     is_hex4(vid),
@@ -61,18 +63,21 @@ impl FromStr for Symlink {
                     "USB symlink PID should be a 4 digit hex number, found `{pid}`"
                 );
                 ensure!(
-                    is_number(ifc),
-                    "USB symlink INTERFACE should be a number, found `{ifc}`"
+                    !if_num.is_empty() && if_num.chars().all(|c| c.is_ascii_digit()),
+                    "USB symlink INTERFACE should be a number, found `{if_num}`"
                 );
 
                 let vid = vid.to_ascii_lowercase();
                 let pid = pid.to_ascii_lowercase();
-                let ifc = format!("{ifc:0>2}");
+                let if_num = format!("{if_num:0>2}");
 
-                Ok(Symlink(SymlinkDevice::Usb(vid, pid, ifc), path))
+                Ok(Symlink {
+                    device: SymlinkDevice::Usb { vid, pid, if_num },
+                    path,
+                })
             }
             _ => {
-                bail!("Symlink PREFIX should be `usb`, found `{prefix}`");
+                bail!("Symlink PREFIX should be `usb`, found `{kind}`");
             }
         }
     }
@@ -81,10 +86,10 @@ impl FromStr for Symlink {
 impl SymlinkDevice {
     fn matches_impl(&self, device: &udev::Device) -> Option<bool> {
         let matches = match self {
-            SymlinkDevice::Usb(vid, pid, ifc) => {
+            SymlinkDevice::Usb { vid, pid, if_num } => {
                 device.property_value("ID_VENDOR_ID")?.to_str()? == vid
                     && device.property_value("ID_MODEL_ID")?.to_str()? == pid
-                    && device.property_value("ID_USB_INTERFACE_NUM")?.to_str()? == ifc
+                    && device.property_value("ID_USB_INTERFACE_NUM")?.to_str()? == if_num
             }
         };
         Some(matches)
@@ -97,8 +102,8 @@ impl SymlinkDevice {
 
 impl Symlink {
     pub fn matches(&self, device: &udev::Device) -> Option<PathBuf> {
-        if self.0.matches(device) {
-            Some(self.1.clone())
+        if self.device.matches(device) {
+            Some(self.path.clone())
         } else {
             None
         }

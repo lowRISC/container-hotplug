@@ -6,11 +6,18 @@ use anyhow::{bail, ensure, Context, Error, Result};
 use udev::Enumerator;
 
 #[derive(Clone)]
-pub struct Device(usize, DeviceType);
+pub struct Device {
+    parent_level: usize,
+    kind: DeviceKind,
+}
 
 #[derive(Clone)]
-pub enum DeviceType {
-    Usb(String, Option<String>, Option<String>),
+pub enum DeviceKind {
+    Usb {
+        vid: String,
+        pid: Option<String>,
+        serial: Option<String>,
+    },
     Syspath(PathBuf),
     Devnode(PathBuf),
 }
@@ -19,65 +26,58 @@ fn is_hex4(val: &str) -> bool {
     val.len() == 4 && val.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn is_alphanum(val: &str) -> bool {
-    val.len() >= 1 && val.chars().all(|c| c.is_ascii_alphanumeric())
-}
-
 impl FromStr for Device {
     type Err = Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<_> = s.split(":").collect();
 
-        let parent_steps = parts
-            .iter()
-            .copied()
-            .take_while(|part| *part == "parent-of")
-            .count();
+    fn from_str(mut s: &str) -> Result<Self> {
+        let mut parent_level = 0;
+        while let Some(remainder) = s.strip_prefix("parent-of:") {
+            s = remainder;
+            parent_level += 1;
+        }
 
-        let parts = &parts[parent_steps..];
+        let Some((kind, dev)) = s.split_once(':') else {
+            bail!("Device format should be `[[parent-of:]*]<PREFIX>:<DEVICE>`, found `{s}`");
+        };
 
-        ensure!(
-            parts.len() >= 2,
-            "Device format should be `[[parent-of:]*]<PREFIX>:<DEVICE>`, found `{s}`"
-        );
-
-        let prefix = parts[0];
-        let parts = &parts[1..];
-        let dev = parts.join(":");
-
-        let device = match prefix {
+        let device = match kind {
             "usb" => {
-                ensure!(
-                    parts.len() >= 1 && parts.len() <= 3,
-                    "Device format for usb should be `<VID>[:<PID>[:<SERIAL>]]`, found `{dev}`."
-                );
-
-                let mut parts = parts.iter().copied();
+                let mut parts = dev.split(':');
 
                 let vid = parts.next().unwrap();
                 let pid = parts.next();
                 let serial = parts.next();
 
+                if parts.next().is_some() {
+                    bail!(
+                        "Device format for usb should be `<VID>[:<PID>[:<SERIAL>]]`, found `{dev}`."
+                    );
+                }
+
                 ensure!(
                     is_hex4(vid),
                     "USB device VID should be a 4 digit hex number, found `{vid}`"
                 );
-                ensure!(
-                    pid.is_none() || is_hex4(pid.unwrap()),
-                    "USB device PID should be a 4 digit hex number, found `{}`",
-                    pid.unwrap()
-                );
-                ensure!(
-                    serial.is_none() || is_alphanum(serial.unwrap()),
-                    "USB device SERIAL should be alphanumeric, found `{}`",
-                    serial.unwrap()
-                );
+                if let Some(pid) = pid {
+                    ensure!(
+                        is_hex4(pid),
+                        "USB device PID should be a 4 digit hex number, found `{}`",
+                        pid
+                    );
+                }
+                if let Some(serial) = serial {
+                    ensure!(
+                        !serial.is_empty() && serial.chars().all(|c| c.is_ascii_alphanumeric()),
+                        "USB device SERIAL should be alphanumeric, found `{}`",
+                        serial
+                    );
+                }
 
                 let vid = vid.to_ascii_lowercase();
                 let pid = pid.map(|s| s.to_ascii_lowercase());
                 let serial = serial.map(|s| s.to_owned());
 
-                DeviceType::Usb(vid, pid, serial)
+                DeviceKind::Usb { vid, pid, serial }
             }
             "syspath" => {
                 let path = PathBuf::from(&dev);
@@ -86,42 +86,48 @@ impl FromStr for Device {
                     "Syspath device PATH should be a directory path in /sys/**"
                 );
 
-                DeviceType::Syspath(path)
+                DeviceKind::Syspath(path)
             }
             "devnode" => {
                 let path = PathBuf::from(&dev);
                 ensure!(
-                    path.is_absolute() && path.starts_with("/dev") && !dev.ends_with("/"),
+                    path.is_absolute() && path.starts_with("/dev") && !dev.ends_with('/'),
                     "Devnode device PATH should be a file path in /dev/**"
                 );
 
-                DeviceType::Devnode(path)
+                DeviceKind::Devnode(path)
             }
             _ => {
-                bail!("Device PREFIX should be one of `usb`, `syspath` or `devnode`, found `{prefix}`");
+                bail!(
+                    "Device PREFIX should be one of `usb`, `syspath` or `devnode`, found `{kind}`"
+                );
             }
         };
 
-        Ok(Device(parent_steps, device))
+        Ok(Device {
+            parent_level,
+            kind: device,
+        })
     }
 }
 
-impl Display for DeviceType {
+impl Display for DeviceKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
-            DeviceType::Usb(vid, Some(pid), Some(serial)) => {
-                write!(f, "usb:{vid}:{pid}:{serial}")
+            DeviceKind::Usb { vid, pid, serial } => {
+                write!(f, "usb:{vid}")?;
+                if let Some(pid) = pid {
+                    write!(f, ":{pid}")?;
+                }
+                if let Some(serial) = serial {
+                    write!(f, ":{serial}")?;
+                }
+                Ok(())
             }
-            DeviceType::Usb(vid, Some(pid), None) => {
-                write!(f, "usb:{vid}:{pid}")
-            }
-            DeviceType::Usb(vid, None, _) => {
-                write!(f, "usb:{vid}")
-            }
-            DeviceType::Syspath(path) => {
+            DeviceKind::Syspath(path) => {
                 write!(f, "syspath:{}", path.display())
             }
-            DeviceType::Devnode(path) => {
+            DeviceKind::Devnode(path) => {
                 write!(f, "devnode:{}", path.display())
             }
         }
@@ -130,17 +136,17 @@ impl Display for DeviceType {
 
 impl Display for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for _ in 0..self.0 {
+        for _ in 0..self.parent_level {
             write!(f, "parent-of:")?;
         }
-        write!(f, "{}", self.1)
+        write!(f, "{}", self.kind)
     }
 }
 
-impl DeviceType {
+impl DeviceKind {
     fn device(&self) -> Result<udev::Device> {
         let dev = match &self {
-            DeviceType::Usb(vid, pid, serial) => {
+            DeviceKind::Usb { vid, pid, serial } => {
                 let mut enumerator = Enumerator::new()?;
                 enumerator.match_attribute("idVendor", vid)?;
                 if let Some(pid) = pid {
@@ -154,14 +160,14 @@ impl DeviceType {
                     .next()
                     .with_context(|| format!("Failed to find device `{self}`"))?
             }
-            DeviceType::Syspath(path) => {
+            DeviceKind::Syspath(path) => {
                 let path = path
                     .canonicalize()
                     .with_context(|| format!("Failed to resolve PATH for `{self}`"))?;
                 udev::Device::from_syspath(&path)
                     .with_context(|| format!("Failed to find device `{self}`"))?
             }
-            DeviceType::Devnode(path) => {
+            DeviceKind::Devnode(path) => {
                 let path = path
                     .canonicalize()
                     .with_context(|| format!("Failed to resolve PATH for `{self}`"))?;
@@ -179,13 +185,13 @@ impl DeviceType {
 
 impl Device {
     pub fn device(&self) -> Result<udev::Device> {
-        let device = self.1.device()?;
+        let device = self.kind.device()?;
         Ok(device)
     }
 
     pub fn hub(&self) -> Result<udev::Device> {
         let mut device = self.device()?;
-        for _ in 0..self.0 {
+        for _ in 0..self.parent_level {
             device = device.parent().with_context(|| {
                 format!("Failed to obtain parent device while resolving `{self}`")
             })?;

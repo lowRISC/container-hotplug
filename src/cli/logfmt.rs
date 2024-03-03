@@ -1,6 +1,7 @@
-use std::{fmt::Display, str::FromStr};
+use std::fmt::Display;
+use std::str::FromStr;
 
-use anyhow::bail;
+use anyhow::{bail, Error, Result};
 
 #[derive(Clone)]
 pub struct LogFormat {
@@ -22,8 +23,9 @@ impl Default for LogFormat {
 }
 
 impl FromStr for LogFormat {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
         let mut result = Self::default();
         let mut value = true;
         for c in s.chars() {

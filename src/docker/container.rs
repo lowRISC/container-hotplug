@@ -169,7 +169,7 @@ impl Container {
     pub async fn mknod<T: AsRef<std::path::Path>>(
         &self,
         node: T,
-        (major, minor): (u64, u64),
+        (major, minor): (u32, u32),
     ) -> Result<()> {
         self.rm(&node).await?;
         self.mkdir_for(&node).await?;
@@ -214,7 +214,7 @@ impl Container {
 
     pub async fn device(
         &self,
-        (major, minor): (u64, u64),
+        (major, minor): (u32, u32),
         (r, w, m): (bool, bool, bool),
     ) -> Result<()> {
         let mut permissions = String::new();
@@ -268,8 +268,8 @@ impl Container {
 
 async fn allow_device_cgroup1(
     container_id: &str,
-    major: u64,
-    minor: u64,
+    major: u32,
+    minor: u32,
     permissions: &str,
 ) -> Result<()> {
     let path = format!("/sys/fs/cgroup/devices/docker/{container_id}/devices.allow");
@@ -281,8 +281,8 @@ async fn allow_device_cgroup1(
 
 async fn deny_device_cgroup1(
     container_id: &str,
-    major: u64,
-    minor: u64,
+    major: u32,
+    minor: u32,
     permissions: &str,
 ) -> Result<()> {
     let path = format!("/sys/fs/cgroup/devices/docker/{container_id}/devices.deny");

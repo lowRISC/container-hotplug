@@ -50,8 +50,8 @@ impl IoStream {
         let resize_stream = try_stream! {
             let mut stream = signal(SignalKind::window_change())?;
             loop {
-                match termsize::get().ok_or(io::Error::from_raw_os_error(libc::ENOTTY)) {
-                    Ok(size) => yield (size.rows, size.cols),
+                match termsize::get() {
+                    Some(size) => yield (size.rows, size.cols),
                     _ => {},
                 }
                 stream.recv().await;
@@ -154,7 +154,7 @@ fn stdin() -> Pin<Box<dyn tokio::io::AsyncRead + Send>> {
 }
 
 fn try_stdin() -> Result<Pin<Box<dyn AsyncRead + Send>>> {
-    let mut stdin = tokio_fd::AsyncFd::try_from(libc::STDIN_FILENO)?.guard_mode()?;
+    let mut stdin = tokio_fd::AsyncFd::try_from(rustix::stdio::raw_stdin())?.guard_mode()?;
     stdin.modify_mode(|mut t| {
         use libc::*;
         t.c_iflag &= !(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
@@ -176,14 +176,14 @@ fn try_stdin() -> Result<Pin<Box<dyn AsyncRead + Send>>> {
 }
 
 fn stdout() -> Pin<Box<dyn tokio::io::AsyncWrite + Send>> {
-    match tokio_fd::AsyncFd::try_from(libc::STDOUT_FILENO) {
+    match tokio_fd::AsyncFd::try_from(rustix::stdio::raw_stdout()) {
         Ok(stdout) => Box::pin(stdout),
         Err(_) => Box::pin(sink()),
     }
 }
 
 fn stderr() -> Pin<Box<dyn tokio::io::AsyncWrite + Send>> {
-    match tokio_fd::AsyncFd::try_from(libc::STDERR_FILENO) {
+    match tokio_fd::AsyncFd::try_from(rustix::stdio::raw_stderr()) {
         Ok(stdout) => Box::pin(stdout),
         Err(_) => Box::pin(sink()),
     }

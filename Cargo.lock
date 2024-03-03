@@ -354,6 +354,7 @@ dependencies = [
  "libc",
  "log",
  "raw_tty",
+ "rustix",
  "termsize",
  "tokio",
  "tokio-fd",

@@ -30,3 +30,4 @@ futures-core = "0.3"
 udev = "0.8"
 bollard = "0.15"
 futures = "0.3"
+rustix = { version = "0.38", features = ["fs", "stdio"] }

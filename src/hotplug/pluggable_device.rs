@@ -5,7 +5,7 @@ use udev::Device;
 #[derive(Debug, Clone)]
 pub struct PluggableDevice {
     pub(super) device: Device,
-    pub(super) devnum: (u64, u64),
+    pub(super) devnum: (u32, u32),
     pub(super) devnode: PathBuf,
 }
 
@@ -13,14 +13,12 @@ impl PluggableDevice {
     pub fn from_device(device: &Device) -> Option<Self> {
         let device = device.clone();
         let devnum = device.devnum()?;
-        let devnum = (
-            (devnum & 0xfff00) >> 8,
-            (devnum & 0xff) | ((devnum >> 12) & 0xfff00),
-        );
+        let major = rustix::fs::major(devnum);
+        let minor = rustix::fs::minor(devnum);
         let devnode = device.devnode()?.to_owned();
         Some(Self {
             device,
-            devnum,
+            devnum: (major, minor),
             devnode,
         })
     }
@@ -57,7 +55,7 @@ impl PluggableDevice {
         &self.device.syspath()
     }
 
-    pub fn devnum(&self) -> (u64, u64) {
+    pub fn devnum(&self) -> (u32, u32) {
         self.devnum
     }
 

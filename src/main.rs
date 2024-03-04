@@ -7,7 +7,8 @@ use cli::{Device, LogFormat, Symlink, Timeout};
 use docker::{Container, Docker};
 use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
 
-use std::{fmt::Display, path::Path, process::ExitCode};
+use std::pin::pin;
+use std::{fmt::Display, path::Path};
 use tokio_stream::StreamExt;
 
 use anyhow::{bail, Context, Result};
@@ -148,9 +149,9 @@ fn run_hotplug(
     }
 }
 
-async fn hotplug_main() -> Result<ExitCode> {
+async fn hotplug_main() -> Result<u8> {
     let args = Args::parse();
-    let mut status = ExitCode::SUCCESS;
+    let mut status = 0;
 
     match args.action {
         Action::Run {
@@ -184,7 +185,6 @@ async fn hotplug_main() -> Result<ExitCode> {
 
             let docker = Docker::connect_with_defaults()?;
             let container = docker.run(docker_args).await?;
-            let _guard = container.guard(remove_timeout);
             let _ = container.pipe_signals();
 
             let hub_path = root_device.hub()?.syspath().to_owned();
@@ -197,32 +197,44 @@ async fn hotplug_main() -> Result<ExitCode> {
                 }
             };
 
-            let stream = tokio_stream::empty()
+            let stream = pin!(tokio_stream::empty()
                 .merge(hotplug_stream)
-                .merge(container_stream);
+                .merge(container_stream));
 
-            tokio::pin!(stream);
-            while let Some(event) = stream.next().await {
-                let event = event?;
-                info!("{}", event);
-                match event {
-                    Event::Remove(dev) if dev.syspath() == hub_path => {
-                        info!("Hub device detached. Stopping container.");
-                        status = ExitCode::from(root_unplugged_exit_code);
-                        container.kill(15).await?;
-                        break;
-                    }
-                    Event::Stopped(_, code) => {
-                        if code >= 0 && code < 256 && (code as u8) != root_unplugged_exit_code {
-                            status = ExitCode::from(code as u8);
-                        } else {
-                            status = ExitCode::FAILURE;
+            let result: Result<()> = async {
+                tokio::pin!(stream);
+                while let Some(event) = stream.next().await {
+                    let event = event?;
+                    info!("{}", event);
+                    match event {
+                        Event::Remove(dev) if dev.syspath() == hub_path => {
+                            info!("Hub device detached. Stopping container.");
+                            status = root_unplugged_exit_code;
+                            container.kill(15).await?;
+                            break;
                         }
-                        break;
+                        Event::Stopped(_, code) => {
+                            status = 1;
+                            if let Ok(code) = u8::try_from(code) {
+                                // Use the container exit code, but only if it won't be confused
+                                // with the pre-defined root_unplugged_exit_code.
+                                if code != root_unplugged_exit_code {
+                                    status = code;
+                                }
+                            } else {
+                                status = 1;
+                            }
+                            break;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
+                Ok(())
             }
+            .await;
+
+            let _ = container.remove(remove_timeout).await;
+            result?
         }
     };
 
@@ -230,12 +242,15 @@ async fn hotplug_main() -> Result<ExitCode> {
 }
 
 #[tokio::main]
-async fn main() -> ExitCode {
-    match hotplug_main().await {
+async fn main() {
+    let code = match hotplug_main().await {
         Ok(code) => code,
         Err(err) => {
-            let _ = eprintln!("Error: {err:?}");
-            ExitCode::FAILURE
+            eprintln!("Error: {err:?}");
+            1
         }
-    }
+    };
+    // Upon returning from `main`, tokio will attempt to shutdown, but if there're any blocking
+    // operation (e.g. fs operations), then the shutdown will hang.
+    std::process::exit(code.into());
 }

@@ -62,14 +62,11 @@ fn container_removed_future(
         ..Default::default()
     };
 
-    let removed = docker
-        .events(Some(options))
-        .map(|evt| evt.ok())
-        .take(1)
-        .collect::<Vec<_>>()
-        .map(|vec| vec.into_iter().next().flatten())
-        .boxed()
-        .shared();
+    let mut events = docker.events(Some(options));
 
-    removed
+    // Spawn the future to start listening event.
+    tokio::spawn(async move { events.next().await?.ok() })
+        .map(|x| x.ok().flatten())
+        .boxed()
+        .shared()
 }

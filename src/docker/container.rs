@@ -17,32 +17,29 @@ pub struct Container {
     pub(super) remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
 }
 
-pub struct ContainerGuard(Option<Container>, Timeout);
-
-impl Drop for ContainerGuard {
-    fn drop(&mut self) {
-        let container = self.0.take().unwrap();
-        let timeout = self.1;
-        let _ = futures::executor::block_on(container.remove(timeout));
-    }
-}
-
 impl Container {
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    pub fn guard(&self, timeout: Timeout) -> ContainerGuard {
-        ContainerGuard(Some(self.clone()), timeout)
-    }
-
     pub async fn remove(&self, timeout: Timeout) -> Result<()> {
-        self.rename(format!("removing-{}", self.id)).await?;
-        let options = bollard::container::RemoveContainerOptions {
-            force: true,
-            ..Default::default()
-        };
-        let _ = self.docker.remove_container(&self.id, Some(options)).await;
+        log::info!("Removing container {}", self.id);
+
+        // Since we passed "--rm" flag, docker will automatically start removing the container.
+        // Ignore any error for manual removal.
+        let _: Result<()> = async {
+            self.rename(format!("removing-{}", self.id)).await?;
+            let options = bollard::container::RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            };
+            self.docker
+                .remove_container(&self.id, Some(options))
+                .await?;
+            Ok(())
+        }
+        .await;
+
         if let Timeout::Some(duration) = timeout {
             let _ = tokio::time::timeout(duration, self.remove_event.clone()).await;
         } else {

@@ -3,7 +3,7 @@ mod docker;
 mod hotplug;
 mod util;
 
-use cli::{Device, LogFormat, Symlink, Timeout};
+use cli::{Action, Device, Symlink};
 use docker::{Container, Docker};
 use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
 
@@ -12,65 +12,11 @@ use std::{fmt::Display, path::Path};
 use tokio_stream::StreamExt;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use clap_verbosity_flag::{InfoLevel, LogLevel, Verbosity};
 use log::info;
 
 use crate::hotplug::PluggableDevice;
-
-#[derive(Parser)]
-#[command(max_term_width = 180)]
-struct Args {
-    #[command(subcommand)]
-    action: Action,
-}
-
-#[derive(Subcommand)]
-enum Action {
-    /// Wraps a call to `docker run` to allow hot-plugging devices into a
-    /// container as they are plugged
-    Run {
-        #[arg(short = 'd', long, id = "DEVICE")]
-        /// Root hotplug device: [[parent-of:]*]<PREFIX>:<DEVICE> {n}
-        /// PREFIX can be: {n}
-        ///  - usb: A USB device identified as <VID>[:<PID>[:<SERIAL>]] {n}
-        ///  - syspath: A directory path in /sys/** {n}
-        ///  - devnode: A device path in /dev/** {n}
-        /// e.g., parent-of:usb:2b3e:c310
-        root_device: Device,
-
-        #[arg(short = 'l', long, id = "SYMLINK")]
-        /// Create a symlink for a device: <PREFIX>:<DEVICE>=<PATH> {n}
-        /// PREFIX can be: {n}
-        ///  - usb: A USB device identified as <VID>:<PID>:<INTERFACE> {n}
-        /// e.g., usb:2b3e:c310:1=/dev/ttyACM_CW310_0
-        symlink: Vec<Symlink>,
-
-        #[arg(short = 'u', long, default_value = "5", id = "CODE")]
-        /// Exit code to return when the root device is unplugged
-        root_unplugged_exit_code: u8,
-
-        #[arg(short = 't', long, default_value = "20s", id = "TIMEOUT")]
-        /// Timeout when waiting for the container to be removed
-        remove_timeout: Timeout,
-
-        #[command(flatten)]
-        verbosity: Verbosity<InfoLevel>,
-
-        #[arg(short = 'L', long, default_value = "+l-pmt", id = "FORMAT")]
-        /// Log mesage format: [[+-][ltmp]*]* {n}
-        ///   +/-: enable/disable {n}
-        ///   l: level {n}
-        ///   t: timestamp {n}
-        ///   m/p: module name/path {n}
-        ///
-        log_format: LogFormat,
-
-        #[arg(trailing_var_arg = true, id = "ARGS")]
-        /// Arguments to pass to `docker run`
-        docker_args: Vec<String>,
-    },
-}
 
 #[derive(Clone)]
 enum Event {
@@ -149,101 +95,97 @@ fn run_hotplug(
     }
 }
 
-async fn hotplug_main() -> Result<u8> {
-    let args = Args::parse();
+async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
     let mut status = 0;
 
-    match args.action {
-        Action::Run {
-            verbosity,
-            log_format,
-            remove_timeout,
-            root_unplugged_exit_code,
-            root_device,
-            symlink,
-            docker_args,
-        } => {
-            let log_env = env_logger::Env::default()
-                .filter_or("LOG", "off")
-                .write_style_or("LOG_STYLE", "auto");
+    if !Path::new("/sys/fs/cgroup/devices/").is_dir() {
+        bail!("Could not find cgroup v1");
+    }
 
-            if !Path::new("/sys/fs/cgroup/devices/").is_dir() {
-                bail!("Could not find cgroup v1");
-            }
+    let docker = Docker::connect_with_defaults()?;
+    let container = docker.run(param.docker_args).await?;
+    let _ = container.pipe_signals();
 
-            env_logger::Builder::from_env(log_env)
-                .filter_module("container_hotplug", verbosity.log_level_filter())
-                .format_timestamp(if log_format.timestamp {
-                    Some(Default::default())
-                } else {
-                    None
-                })
-                .format_module_path(log_format.path)
-                .format_target(log_format.module)
-                .format_level(log_format.level)
-                .init();
-
-            let docker = Docker::connect_with_defaults()?;
-            let container = docker.run(docker_args).await?;
-            let _ = container.pipe_signals();
-
-            let hub_path = root_device.hub()?.syspath().to_owned();
-            let hotplug_stream = run_hotplug(root_device, symlink, container.clone(), verbosity);
-            let container_stream = {
-                let container = container.clone();
-                async_stream::try_stream! {
-                    let status = container.wait().await?;
-                    yield Event::Stopped(container.clone(), status)
-                }
-            };
-
-            let stream = pin!(tokio_stream::empty()
-                .merge(hotplug_stream)
-                .merge(container_stream));
-
-            let result: Result<()> = async {
-                tokio::pin!(stream);
-                while let Some(event) = stream.next().await {
-                    let event = event?;
-                    info!("{}", event);
-                    match event {
-                        Event::Remove(dev) if dev.syspath() == hub_path => {
-                            info!("Hub device detached. Stopping container.");
-                            status = root_unplugged_exit_code;
-                            container.kill(15).await?;
-                            break;
-                        }
-                        Event::Stopped(_, code) => {
-                            status = 1;
-                            if let Ok(code) = u8::try_from(code) {
-                                // Use the container exit code, but only if it won't be confused
-                                // with the pre-defined root_unplugged_exit_code.
-                                if code != root_unplugged_exit_code {
-                                    status = code;
-                                }
-                            } else {
-                                status = 1;
-                            }
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(())
-            }
-            .await;
-
-            let _ = container.remove(remove_timeout).await;
-            result?
+    let hub_path = param.root_device.hub()?.syspath().to_owned();
+    let hotplug_stream = run_hotplug(
+        param.root_device,
+        param.symlink,
+        container.clone(),
+        verbosity,
+    );
+    let container_stream = {
+        let container = container.clone();
+        async_stream::try_stream! {
+            let status = container.wait().await?;
+            yield Event::Stopped(container.clone(), status)
         }
     };
 
+    let stream = pin!(tokio_stream::empty()
+        .merge(hotplug_stream)
+        .merge(container_stream));
+
+    let result: Result<()> = async {
+        tokio::pin!(stream);
+        while let Some(event) = stream.next().await {
+            let event = event?;
+            info!("{}", event);
+            match event {
+                Event::Remove(dev) if dev.syspath() == hub_path => {
+                    info!("Hub device detached. Stopping container.");
+                    status = param.root_unplugged_exit_code;
+                    container.kill(15).await?;
+                    break;
+                }
+                Event::Stopped(_, code) => {
+                    status = 1;
+                    if let Ok(code) = u8::try_from(code) {
+                        // Use the container exit code, but only if it won't be confused
+                        // with the pre-defined root_unplugged_exit_code.
+                        if code != param.root_unplugged_exit_code {
+                            status = code;
+                        }
+                    } else {
+                        status = 1;
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    let _ = container.remove(param.remove_timeout).await;
+    result?;
     Ok(status)
 }
 
 #[tokio::main]
 async fn main() {
-    let code = match hotplug_main().await {
+    let args = cli::Args::parse();
+
+    let log_env = env_logger::Env::default()
+        .filter_or("LOG", "off")
+        .write_style_or("LOG_STYLE", "auto");
+
+    env_logger::Builder::from_env(log_env)
+        .filter_module("container_hotplug", args.verbosity.log_level_filter())
+        .format_timestamp(if args.log_format.timestamp {
+            Some(Default::default())
+        } else {
+            None
+        })
+        .format_module_path(args.log_format.path)
+        .format_target(args.log_format.module)
+        .format_level(args.log_format.level)
+        .init();
+
+    let result = match args.action {
+        Action::Run(param) => run(param, args.verbosity).await,
+    };
+    let code = match result {
         Ok(code) => code,
         Err(err) => {
             eprintln!("Error: {err:?}");

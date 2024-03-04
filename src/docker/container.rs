@@ -1,4 +1,4 @@
-use crate::cli::Timeout;
+use std::time::Duration;
 
 use super::{IoStream, IoStreamSource};
 
@@ -22,7 +22,7 @@ impl Container {
         &self.id
     }
 
-    pub async fn remove(&self, timeout: Timeout) -> Result<()> {
+    pub async fn remove(&self, timeout: Option<Duration>) -> Result<()> {
         log::info!("Removing container {}", self.id);
 
         // Since we passed "--rm" flag, docker will automatically start removing the container.
@@ -40,10 +40,15 @@ impl Container {
         }
         .await;
 
-        if let Timeout::Some(duration) = timeout {
-            let _ = tokio::time::timeout(duration, self.remove_event.clone()).await;
+        if let Some(duration) = timeout {
+            tokio::time::timeout(duration, self.remove_event.clone())
+                .await?
+                .context("no destroy event")?;
         } else {
-            self.remove_event.clone().await;
+            self.remove_event
+                .clone()
+                .await
+                .context("no destroy event")?;
         }
         Ok(())
     }

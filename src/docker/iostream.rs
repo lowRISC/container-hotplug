@@ -3,12 +3,11 @@ use async_stream::try_stream;
 use bollard::container::LogOutput;
 use bollard::errors::Error;
 use bytes::Bytes;
-use std::io;
-use std::pin::Pin;
+use std::pin::{pin, Pin};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinHandle;
-use tokio_stream::{empty, Stream, StreamExt};
+use tokio_stream::{Stream, StreamExt};
 use tokio_util::io::ReaderStream;
 
 pub(super) enum IoStreamSource {
@@ -28,7 +27,6 @@ enum StreamData {
     StdIn(Bytes),
     StdOut(Bytes),
     StdErr(Bytes),
-    Stop,
 }
 
 impl IoStream {
@@ -40,19 +38,16 @@ impl IoStream {
         Ok(result)
     }
 
-    pub fn pipe_std(self) -> JoinHandle<()> {
-        let stdin = Box::pin(crate::util::tty_mode_guard::TtyModeGuard::new(
-            tokio::io::stdin(),
-            |mode| {
-                // Switch input to raw mode, but don't touch output modes (as it can also be connected
-                // to stdout and stderr).
-                let outmode = mode.output_modes;
-                mode.make_raw();
-                mode.output_modes = outmode;
-            },
-        ));
-        let stdout = Box::pin(tokio::io::stdout());
-        let stderr = Box::pin(tokio::io::stderr());
+    pub fn pipe_std(self) -> JoinHandle<Result<()>> {
+        let stdin = crate::util::tty_mode_guard::TtyModeGuard::new(tokio::io::stdin(), |mode| {
+            // Switch input to raw mode, but don't touch output modes (as it can also be connected
+            // to stdout and stderr).
+            let outmode = mode.output_modes;
+            mode.make_raw();
+            mode.output_modes = outmode;
+        });
+        let stdout = tokio::io::stdout();
+        let stderr = tokio::io::stderr();
 
         let resize_stream = try_stream! {
             let mut stream = signal(SignalKind::window_change())?;
@@ -70,56 +65,39 @@ impl IoStream {
 
     pub fn pipe(
         self,
-        stdin: Pin<Box<dyn AsyncRead + Send + 'static>>,
-        mut stdout: Pin<Box<dyn AsyncWrite + Send + 'static>>,
-        mut stderr: Pin<Box<dyn AsyncWrite + Send + 'static>>,
-        resize_stream: impl Stream<Item = io::Result<(u16, u16)>> + Send + 'static,
-    ) -> JoinHandle<()> {
+        stdin: impl AsyncRead + Send + 'static,
+        stdout: impl AsyncWrite + Send + 'static,
+        stderr: impl AsyncWrite + Send + 'static,
+        resize_stream: impl Stream<Item = std::io::Result<(u16, u16)>> + Send + 'static,
+    ) -> JoinHandle<Result<()>> {
         let mut input = self.input;
-        let mut output = self.output;
         let docker = self.docker;
         let source = self.source;
 
-        let resize_stream = async_stream::stream! {
-            tokio::pin!(resize_stream);
-            while let Some(data) = resize_stream.next().await {
-                yield match data {
-                    Ok((rows, cols)) => Ok(StreamData::Resize(rows, cols)),
-                    Err(err) => Err(err).context("Listening for tty resize"),
-                };
-            }
-        };
+        let resize_stream = resize_stream.map(|data| {
+            let (rows, cols) = data.context("Listening for tty resize")?;
+            Ok(StreamData::Resize(rows, cols))
+        });
 
-        let input_stream = async_stream::stream! {
-            let mut stdin = ReaderStream::new(stdin);
-            while let Some(data) = stdin.next().await {
-                yield match data {
-                    Ok(buf) => Ok(StreamData::StdIn(buf)),
-                    Err(err) => Err(err).context("Reading container input stream"),
-                };
-            }
-        };
+        let input_stream = ReaderStream::new(stdin).map(|data| {
+            Ok(StreamData::StdIn(
+                data.context("Reading container input stream")?,
+            ))
+        });
 
-        let output_stream = async_stream::stream! {
-            while let Some(output) = output.next().await {
-                yield match output {
-                    Ok(LogOutput::Console{message}) => Ok(StreamData::StdOut(message)),
-                    Ok(LogOutput::StdOut{message}) => Ok(StreamData::StdOut(message)),
-                    Ok(LogOutput::StdErr{message}) => Ok(StreamData::StdErr(message)),
-                    Err(err) => Err(err).context("Reading container output stream"),
-                    _ => continue,
-                };
-            }
-            yield Ok(StreamData::Stop);
-        };
+        let output_stream = self.output.filter_map(|output| match output {
+            Ok(LogOutput::Console { message }) => Some(Ok(StreamData::StdOut(message))),
+            Ok(LogOutput::StdOut { message }) => Some(Ok(StreamData::StdOut(message))),
+            Ok(LogOutput::StdErr { message }) => Some(Ok(StreamData::StdErr(message))),
+            Err(err) => Some(Err(err).context("Reading container output stream")),
+            _ => None,
+        });
 
-        let streams = empty()
-            .merge(resize_stream)
-            .merge(input_stream)
-            .merge(output_stream);
+        tokio::spawn(async move {
+            let mut streams = pin!(resize_stream.merge(input_stream).merge(output_stream));
+            let mut stdout = pin!(stdout);
+            let mut stderr = pin!(stderr);
 
-        let stream = async_stream::try_stream! {
-            tokio::pin!(streams);
             while let Some(data) = streams.next().await {
                 match data? {
                     StreamData::Resize(rows, cols) => {
@@ -137,17 +115,10 @@ impl IoStream {
                         stderr.write_all_buf(&mut buf).await?;
                         stdout.flush().await?;
                     }
-                    StreamData::Stop => {
-                        break
-                    }
                 };
-                yield ();
             }
-        };
 
-        tokio::spawn(async move {
-            tokio::pin!(stream);
-            let _ = stream.all(|_: Result<()>| true).await;
+            Ok(())
         })
     }
 }

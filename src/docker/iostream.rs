@@ -3,14 +3,13 @@ use async_stream::try_stream;
 use bollard::container::LogOutput;
 use bollard::errors::Error;
 use bytes::Bytes;
-use std::future::pending;
 use std::io;
 use std::pin::Pin;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinHandle;
 use tokio_stream::{empty, Stream, StreamExt};
-use tokio_util::io::{ReaderStream, StreamReader};
+use tokio_util::io::ReaderStream;
 
 pub(super) enum IoStreamSource {
     Container(String),
@@ -38,13 +37,22 @@ impl IoStream {
         while let Some(output) = self.output.next().await {
             result.push_str(&output?.to_string());
         }
-        return Ok(result);
+        Ok(result)
     }
 
     pub fn pipe_std(self) -> JoinHandle<()> {
-        let stdin = stdin();
-        let stdout = stdout();
-        let stderr = stderr();
+        let stdin = Box::pin(crate::util::tty_mode_guard::TtyModeGuard::new(
+            tokio::io::stdin(),
+            |mode| {
+                // Switch input to raw mode, but don't touch output modes (as it can also be connected
+                // to stdout and stderr).
+                let outmode = mode.output_modes;
+                mode.make_raw();
+                mode.output_modes = outmode;
+            },
+        ));
+        let stdout = Box::pin(tokio::io::stdout());
+        let stderr = Box::pin(tokio::io::stderr());
 
         let resize_stream = try_stream! {
             let mut stream = signal(SignalKind::window_change())?;
@@ -144,45 +152,6 @@ impl IoStream {
     }
 }
 
-fn stdin() -> Pin<Box<dyn tokio::io::AsyncRead + Send>> {
-    if let Ok(stdin) = try_stdin() {
-        stdin
-    } else {
-        let stream = async_stream::stream! {
-            yield pending::<std::io::Result<bytes::BytesMut>>().await;
-        };
-        Box::pin(StreamReader::new(stream))
-    }
-}
-
-fn try_stdin() -> Result<Pin<Box<dyn AsyncRead + Send>>> {
-    let mut stdin = crate::util::tty_mode_guard::TtyModeGuard::new(tokio::io::stdin(), |mode| {
-        // Switch input to raw mode, but don't touch output modes (as it can also be connected
-        // to stdout and stderr).
-        let outmode = mode.output_modes;
-        mode.make_raw();
-        mode.output_modes = outmode;
-    })?;
-    let stream = async_stream::stream! {
-        loop {
-            let mut buf = bytes::BytesMut::with_capacity(1024);
-            match stdin.read_buf(&mut buf).await {
-                Ok(_) => yield Ok(buf),
-                Err(err) => yield Err(err),
-            }
-        }
-    };
-    Ok(Box::pin(StreamReader::new(stream)))
-}
-
-fn stdout() -> Pin<Box<dyn tokio::io::AsyncWrite + Send>> {
-    Box::pin(tokio::io::stdout())
-}
-
-fn stderr() -> Pin<Box<dyn tokio::io::AsyncWrite + Send>> {
-    Box::pin(tokio::io::stderr())
-}
-
 async fn resize_tty(
     docker: &bollard::Docker,
     source: &IoStreamSource,
@@ -194,14 +163,14 @@ async fn resize_tty(
                 height: rows,
                 width: cols,
             };
-            docker.resize_container_tty(&id, options).await?;
+            docker.resize_container_tty(id, options).await?;
         }
         IoStreamSource::Exec(id) => {
             let options = bollard::exec::ResizeExecOptions {
                 height: rows,
                 width: cols,
             };
-            docker.resize_exec(&id, options).await?;
+            docker.resize_exec(id, options).await?;
         }
     };
     Ok(())

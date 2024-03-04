@@ -1,3 +1,4 @@
+use std::pin::pin;
 use std::time::Duration;
 
 use super::{IoStream, IoStreamSource};
@@ -240,29 +241,31 @@ impl Container {
 
     pub async fn pipe_signals(&self) -> JoinHandle<Result<()>> {
         let container = self.clone();
-        let handle = spawn(async move {
-            let stream = tokio_stream::empty()
-                .merge(signal_stream(SignalKind::alarm()))
+        let signal_handler = async move {
+            let mut stream = pin!(signal_stream(SignalKind::alarm())
                 .merge(signal_stream(SignalKind::hangup()))
                 .merge(signal_stream(SignalKind::interrupt()))
                 .merge(signal_stream(SignalKind::quit()))
                 .merge(signal_stream(SignalKind::terminate()))
                 .merge(signal_stream(SignalKind::user_defined1()))
-                .merge(signal_stream(SignalKind::user_defined2()));
+                .merge(signal_stream(SignalKind::user_defined2())));
 
-            tokio::pin!(stream);
             while let Some(signal) = stream.next().await {
                 container.kill(signal?.as_raw_value()).await?;
             }
 
-            Err::<(), Error>(anyhow!("Failed to listen for signals"))
-        });
+            Err::<_, Error>(anyhow!("Failed to listen for signals"))
+        };
 
         let container = self.clone();
+        let wait_for_exit = async move { container.wait().await };
+
         spawn(async move {
-            let _ = container.wait().await;
-            handle.abort();
-            Ok::<(), Error>(())
+            tokio::select! {
+                result = signal_handler => result,
+                result = wait_for_exit => result,
+            }?;
+            Ok(())
         })
     }
 }

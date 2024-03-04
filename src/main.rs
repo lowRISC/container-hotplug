@@ -104,7 +104,7 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
 
     let docker = Docker::connect_with_defaults()?;
     let container = docker.run(param.docker_args).await?;
-    let _ = container.pipe_signals();
+    drop(container.pipe_signals());
 
     let hub_path = param.root_device.hub()?.syspath().to_owned();
     let hotplug_stream = run_hotplug(

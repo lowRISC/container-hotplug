@@ -52,7 +52,7 @@ impl PluggableDevice {
     }
 
     pub fn syspath(&self) -> &Path {
-        &self.device.syspath()
+        self.device.syspath()
     }
 
     pub fn devnum(&self) -> (u32, u32) {

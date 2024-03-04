@@ -15,12 +15,12 @@ pub enum UdevEvent {
 pub fn enumerate(hub_path: PathBuf) -> impl tokio_stream::Stream<Item = Result<PluggableDevice>> {
     try_stream! {
         let mut enumerator = Enumerator::new()?;
-        let mut devices = enumerator
+        let devices = enumerator
             .scan_devices()?
             .filter(|device| device.syspath().starts_with(&hub_path))
             .filter_map(|device| PluggableDevice::from_device(&device));
 
-        while let Some(device) = devices.next() {
+        for device in devices {
             yield device;
         }
     }

@@ -53,7 +53,7 @@ impl Container {
         // Since we passed "--rm" flag, docker will automatically start removing the container.
         // Ignore any error for manual removal.
         let _: Result<()> = async {
-            self.rename(format!("removing-{}", self.id)).await?;
+            self.rename(&format!("removing-{}", self.id)).await?;
             let options = bollard::container::RemoveContainerOptions {
                 force: true,
                 ..Default::default()
@@ -78,18 +78,16 @@ impl Container {
         Ok(())
     }
 
-    pub async fn rename<U: AsRef<str>>(&self, name: U) -> Result<()> {
-        let required = bollard::container::RenameContainerOptions {
-            name: name.as_ref(),
-        };
+    pub async fn rename(&self, name: &str) -> Result<()> {
+        let required = bollard::container::RenameContainerOptions { name };
         self.docker.rename_container(&self.id, required).await?;
         Ok(())
     }
 
-    pub async fn exec<U: AsRef<str>, T: AsRef<[U]>>(&self, cmd: T) -> Result<IoStream> {
-        let iter = cmd.as_ref().iter().map(|s| s.as_ref().into());
+    pub async fn exec<T: ToString>(&self, cmd: &[T]) -> Result<IoStream> {
+        let cmd = cmd.iter().map(|s| s.to_string()).collect();
         let options = bollard::exec::CreateExecOptions {
-            cmd: Some(iter.collect()),
+            cmd: Some(cmd),
             attach_stdin: Some(true),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
@@ -105,17 +103,16 @@ impl Container {
             ..Default::default()
         };
         let response = self.docker.start_exec(&id, Some(options)).await?;
+        let bollard::exec::StartExecResults::Attached { input, output } = response else {
+            unreachable!("we asked for attached IO streams");
+        };
 
-        if let bollard::exec::StartExecResults::Attached { input, output } = response {
-            return Ok(IoStream {
-                output,
-                input,
-                source: IoStreamSource::Exec(id),
-                docker: self.docker.clone(),
-            });
-        }
-
-        unreachable!();
+        Ok(IoStream {
+            output,
+            input,
+            source: IoStreamSource::Exec(id),
+            docker: self.docker.clone(),
+        })
     }
 
     pub async fn attach(&self) -> Result<IoStream> {
@@ -141,15 +138,11 @@ impl Container {
         })
     }
 
-    async fn inspect(&self) -> Result<bollard::models::ContainerInspectResponse> {
-        Ok(self
+    pub async fn name(&self) -> Result<String> {
+        let inspect = self
             .docker
             .inspect_container(self.id.as_ref(), None)
-            .await?)
-    }
-
-    pub async fn name(&self) -> Result<String> {
-        let inspect = self.inspect().await?;
+            .await?;
         let name = inspect.name.context("Failed to obtain container name")?;
         Ok(name)
     }
@@ -183,64 +176,40 @@ impl Container {
         }
     }
 
-    pub async fn mkdir<T: AsRef<std::path::Path>>(&self, path: T) -> Result<()> {
-        self.exec(["mkdir", "-p", &path.as_ref().to_string_lossy()])
-            .await?
-            .collect()
-            .await?;
+    // Note: we use `&str` here instead of `Path` because docker API expects string instead `OsStr`.
+    pub async fn mkdir(&self, path: &str) -> Result<()> {
+        self.exec(&["mkdir", "-p", path]).await?.collect().await?;
         Ok(())
     }
 
-    pub async fn mkdir_for<T: AsRef<std::path::Path>>(&self, path: T) -> Result<()> {
-        if let Some(path) = path.as_ref().parent() {
-            self.mkdir(path).await?;
+    pub async fn mkdir_for(&self, path: &str) -> Result<()> {
+        if let Some(path) = std::path::Path::new(path).parent() {
+            self.mkdir(path.to_str().unwrap()).await?;
         }
         Ok(())
     }
 
-    pub async fn mknod<T: AsRef<std::path::Path>>(
-        &self,
-        node: T,
-        (major, minor): (u32, u32),
-    ) -> Result<()> {
-        self.rm(&node).await?;
-        self.mkdir_for(&node).await?;
-        self.exec([
-            "mknod",
-            &node.as_ref().to_string_lossy(),
-            "c",
-            &major.to_string(),
-            &minor.to_string(),
-        ])
-        .await?
-        .collect()
-        .await?;
-        Ok(())
-    }
-
-    pub async fn symlink<T: AsRef<std::path::Path>, U: AsRef<std::path::Path>>(
-        &self,
-        source: T,
-        link: U,
-    ) -> Result<()> {
-        self.mkdir_for(&link).await?;
-        self.exec([
-            "ln",
-            "-sf",
-            &source.as_ref().to_string_lossy(),
-            &link.as_ref().to_string_lossy(),
-        ])
-        .await?
-        .collect()
-        .await?;
-        Ok(())
-    }
-
-    pub async fn rm<T: AsRef<std::path::Path>>(&self, node: T) -> Result<()> {
-        self.exec(["rm", "-f", &node.as_ref().to_string_lossy()])
+    pub async fn mknod(&self, node: &str, (major, minor): (u32, u32)) -> Result<()> {
+        self.rm(node).await?;
+        self.mkdir_for(node).await?;
+        self.exec(&["mknod", node, "c", &major.to_string(), &minor.to_string()])
             .await?
             .collect()
             .await?;
+        Ok(())
+    }
+
+    pub async fn symlink(&self, source: &str, link: &str) -> Result<()> {
+        self.mkdir_for(link).await?;
+        self.exec(&["ln", "-sf", source, link])
+            .await?
+            .collect()
+            .await?;
+        Ok(())
+    }
+
+    pub async fn rm(&self, node: &str) -> Result<()> {
+        self.exec(&["rm", "-f", node]).await?.collect().await?;
         Ok(())
     }
 
@@ -328,7 +297,7 @@ fn signal_stream(kind: SignalKind) -> impl tokio_stream::Stream<Item = Result<Si
     async_stream::try_stream! {
         let sig_kind = SignalKind::hangup();
         let mut sig_stream = signal(kind)?;
-        while let Some(_) = sig_stream.recv().await {
+        while sig_stream.recv().await.is_some() {
             yield sig_kind;
         }
     }

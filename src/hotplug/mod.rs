@@ -7,7 +7,7 @@ use crate::docker::Container;
 
 use async_stream::try_stream;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::stream::LocalBoxStream;
 
 use std::collections::HashMap;
@@ -110,11 +110,12 @@ impl HotPlug {
         self.container
             .device(device.devnum(), (true, true, true))
             .await?;
-        self.container
-            .mknod(device.devnode(), device.devnum())
-            .await?;
+        let devnode = device.devnode().to_str().context("devnode is not UTF-8")?;
+        self.container.mknod(devnode, device.devnum()).await?;
         if let Some(symlink) = device.symlink() {
-            self.container.symlink(device.devnode(), symlink).await?;
+            self.container
+                .symlink(devnode, symlink.to_str().context("symlink is not UTF-8")?)
+                .await?;
         }
         let syspath = device.syspath().to_owned();
         self.devices.insert(syspath, device.clone());
@@ -127,9 +128,13 @@ impl HotPlug {
             self.container
                 .device(device.devnum(), (false, false, false))
                 .await?;
-            self.container.rm(device.devnode()).await?;
+            self.container
+                .rm(device.devnode().to_str().context("devnode is not UTF-8")?)
+                .await?;
             if let Some(symlink) = device.symlink() {
-                self.container.rm(symlink).await?;
+                self.container
+                    .rm(symlink.to_str().context("devnode is not UTF-8")?)
+                    .await?;
             }
             Ok(Some(device))
         } else {

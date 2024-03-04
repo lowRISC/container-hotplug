@@ -5,6 +5,7 @@ use super::{IoStream, IoStreamSource};
 use anyhow::{anyhow, Context, Error, Result};
 use bollard::service::EventMessage;
 use futures::future::{BoxFuture, Shared};
+use futures::FutureExt;
 use tokio::io::AsyncWriteExt;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::{spawn, JoinHandle};
@@ -12,12 +13,36 @@ use tokio_stream::StreamExt;
 
 #[derive(Clone)]
 pub struct Container {
-    pub(super) id: String,
-    pub(super) docker: bollard::Docker,
-    pub(super) remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
+    id: String,
+    docker: bollard::Docker,
+    remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
 }
 
 impl Container {
+    pub(super) fn new(id: &str, docker: &bollard::Docker) -> Result<Self> {
+        let mut remove_events = docker.events(Some(bollard::system::EventsOptions {
+            filters: [
+                ("container".to_owned(), vec![id.to_owned()]),
+                ("type".to_owned(), vec!["container".to_owned()]),
+                ("event".to_owned(), vec!["destroy".to_owned()]),
+            ]
+            .into(),
+            ..Default::default()
+        }));
+
+        // Spawn the future to start listening event.
+        let remove_evevnt = tokio::spawn(async move { remove_events.next().await?.ok() })
+            .map(|x| x.ok().flatten())
+            .boxed()
+            .shared();
+
+        Ok(Self {
+            id: id.to_owned(),
+            docker: docker.clone(),
+            remove_event: remove_evevnt,
+        })
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }

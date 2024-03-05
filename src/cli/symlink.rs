@@ -41,7 +41,7 @@ impl FromStr for Symlink {
 
         let path = PathBuf::from(path);
 
-        let Some((kind, dev)) = s.split_once(':') else {
+        let Some((kind, dev)) = dev.split_once(':') else {
             bail!("Symlink DEVICE format should be `<PREFIX>:<DEVICE>`, found `{dev}`");
         };
 

@@ -215,7 +215,8 @@ impl Container {
     }
 
     pub async fn chown_to_user(&self, path: &str) -> Result<()> {
-        self.exec_as_root(&["chown", &format!("{}:", self.user), path])
+        // Use `-h` to not follow symlink, and `user:` will use user's login group.
+        self.exec_as_root(&["chown", "-h", &format!("{}:", self.user), path])
             .await?
             .collect()
             .await?;

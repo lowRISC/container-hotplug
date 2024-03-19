@@ -1,4 +1,4 @@
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use aya::maps::{HashMap, MapData};
 use aya::programs::{CgroupDevice, Link};
 use std::fs::File;
@@ -193,6 +193,24 @@ impl DeviceAccessController for DeviceAccessControllerV2 {
 
     fn stop(self: Box<Self>) -> Result<()> {
         CgroupDevice::from_pin(&self.pin)?.unpin()?;
+        Ok(())
+    }
+}
+
+pub struct DeviceAccessControllerDummy;
+
+impl DeviceAccessController for DeviceAccessControllerDummy {
+    fn set_permission(
+        &mut self,
+        _ty: DeviceType,
+        _major: u32,
+        _minor: u32,
+        _access: Access,
+    ) -> Result<()> {
+        bail!("neither cgroup v1 and cgroup v2 works");
+    }
+
+    fn stop(self: Box<Self>) -> Result<()> {
         Ok(())
     }
 }

@@ -10,7 +10,10 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::{spawn, JoinHandle};
 use tokio_stream::StreamExt;
 
-use super::cgroup::{Access, DeviceAccessController, DeviceAccessControllerV1, DeviceAccessControllerV2, DeviceType};
+use super::cgroup::{
+    Access, DeviceAccessController, DeviceAccessControllerDummy, DeviceAccessControllerV1,
+    DeviceAccessControllerV2, DeviceType,
+};
 use super::{IoStream, IoStreamSource};
 
 #[derive(Clone)]
@@ -42,9 +45,14 @@ impl Container {
         let cgroup_device_filter: Box<dyn DeviceAccessController + Send> =
             match DeviceAccessControllerV2::new(id) {
                 Ok(v) => Box::new(v),
-                Err(err) => match DeviceAccessControllerV1::new(id) {
+                Err(err2) => match DeviceAccessControllerV1::new(id) {
                     Ok(v) => Box::new(v),
-                    Err(_) => Err(err).context("neither cgroup v1 and cgroup v2 works")?,
+                    Err(err1) => {
+                        log::error!("neither cgroup v1 and cgroup v2 works");
+                        log::error!("cgroup v2: {err2}");
+                        log::error!("cgroup v1: {err1}");
+                        Box::new(DeviceAccessControllerDummy)
+                    }
                 },
             };
 

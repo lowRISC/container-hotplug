@@ -18,14 +18,15 @@ use super::{IoStream, IoStreamSource};
 
 #[derive(Clone)]
 pub struct Container {
-    id: String,
     docker: bollard::Docker,
+    id: String,
+    user: String,
     remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
     cgroup_device_filter: Arc<Mutex<Option<Box<dyn DeviceAccessController + Send>>>>,
 }
 
 impl Container {
-    pub(super) fn new(id: &str, docker: &bollard::Docker) -> Result<Self> {
+    pub(super) fn new(docker: &bollard::Docker, id: String, user: String) -> Result<Self> {
         let mut remove_events = docker.events(Some(bollard::system::EventsOptions {
             filters: [
                 ("container".to_owned(), vec![id.to_owned()]),
@@ -43,9 +44,9 @@ impl Container {
             .shared();
 
         let cgroup_device_filter: Box<dyn DeviceAccessController + Send> =
-            match DeviceAccessControllerV2::new(id) {
+            match DeviceAccessControllerV2::new(&id) {
                 Ok(v) => Box::new(v),
-                Err(err2) => match DeviceAccessControllerV1::new(id) {
+                Err(err2) => match DeviceAccessControllerV1::new(&id) {
                     Ok(v) => Box::new(v),
                     Err(err1) => {
                         log::error!("neither cgroup v1 and cgroup v2 works");
@@ -57,8 +58,14 @@ impl Container {
             };
 
         Ok(Self {
-            id: id.to_owned(),
             docker: docker.clone(),
+            id,
+            user: if user.is_empty() {
+                // If user is not specified, use root.
+                "root".to_owned()
+            } else {
+                user
+            },
             remove_event: remove_evevnt,
             cgroup_device_filter: Arc::new(Mutex::new(Some(cgroup_device_filter))),
         })
@@ -114,7 +121,7 @@ impl Container {
         Ok(())
     }
 
-    pub async fn exec<T: ToString>(&self, cmd: &[T]) -> Result<IoStream> {
+    pub async fn exec_as_root<T: ToString>(&self, cmd: &[T]) -> Result<IoStream> {
         let cmd = cmd.iter().map(|s| s.to_string()).collect();
         let options = bollard::exec::CreateExecOptions {
             cmd: Some(cmd),
@@ -123,6 +130,7 @@ impl Container {
             attach_stderr: Some(true),
             tty: Some(true),
             detach_keys: Some("ctrl-c".to_string()),
+            user: Some("root".to_string()),
             ..Default::default()
         };
         let response = self.docker.create_exec::<String>(&self.id, options).await?;
@@ -206,9 +214,20 @@ impl Container {
         }
     }
 
+    pub async fn chown_to_user(&self, path: &str) -> Result<()> {
+        self.exec_as_root(&["chown", &format!("{}:", self.user), path])
+            .await?
+            .collect()
+            .await?;
+        Ok(())
+    }
+
     // Note: we use `&str` here instead of `Path` because docker API expects string instead `OsStr`.
     pub async fn mkdir(&self, path: &str) -> Result<()> {
-        self.exec(&["mkdir", "-p", path]).await?.collect().await?;
+        self.exec_as_root(&["mkdir", "-p", path])
+            .await?
+            .collect()
+            .await?;
         Ok(())
     }
 
@@ -222,24 +241,29 @@ impl Container {
     pub async fn mknod(&self, node: &str, (major, minor): (u32, u32)) -> Result<()> {
         self.rm(node).await?;
         self.mkdir_for(node).await?;
-        self.exec(&["mknod", node, "c", &major.to_string(), &minor.to_string()])
+        self.exec_as_root(&["mknod", node, "c", &major.to_string(), &minor.to_string()])
             .await?
             .collect()
             .await?;
+        self.chown_to_user(node).await?;
         Ok(())
     }
 
     pub async fn symlink(&self, source: &str, link: &str) -> Result<()> {
         self.mkdir_for(link).await?;
-        self.exec(&["ln", "-sf", source, link])
+        self.exec_as_root(&["ln", "-sf", source, link])
             .await?
             .collect()
             .await?;
+        self.chown_to_user(link).await?;
         Ok(())
     }
 
     pub async fn rm(&self, node: &str) -> Result<()> {
-        self.exec(&["rm", "-f", node]).await?.collect().await?;
+        self.exec_as_root(&["rm", "-f", node])
+            .await?
+            .collect()
+            .await?;
         Ok(())
     }
 

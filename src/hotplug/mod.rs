@@ -1,6 +1,7 @@
 mod plugged_device;
 mod udev_streams;
 
+use crate::cgroup::Access;
 use crate::cli;
 use crate::docker::Container;
 
@@ -101,9 +102,7 @@ impl HotPlug {
         let symlink = self.find_symlink(&device);
         let device = PluggedDevice { device, symlink };
         let devnode = device.devnode().unwrap();
-        self.container
-            .device(devnode.devnum, (true, true, true))
-            .await?;
+        self.container.device(devnode.devnum, Access::all()).await?;
         self.container.mknod(&devnode.path, devnode.devnum).await?;
         if let Some(symlink) = device.symlink() {
             self.container.symlink(&devnode.path, symlink).await?;
@@ -118,7 +117,7 @@ impl HotPlug {
         if let Some(device) = self.devices.remove(&syspath) {
             let devnode = device.devnode().unwrap();
             self.container
-                .device(devnode.devnum, (false, false, false))
+                .device(devnode.devnum, Access::empty())
                 .await?;
             self.container.rm(&devnode.path).await?;
             if let Some(symlink) = device.symlink() {

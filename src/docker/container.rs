@@ -279,11 +279,7 @@ impl Container {
         Ok(())
     }
 
-    pub async fn device(
-        &self,
-        (major, minor): (u32, u32),
-        (r, w, m): (bool, bool, bool),
-    ) -> Result<()> {
+    pub async fn device(&self, (major, minor): (u32, u32), access: Access) -> Result<()> {
         let controller = self.cgroup_device_filter.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut controller = controller.lock().unwrap();
@@ -291,9 +287,7 @@ impl Container {
                 DeviceType::Character,
                 major,
                 minor,
-                if r { Access::READ } else { Access::empty() }
-                    | if w { Access::WRITE } else { Access::empty() }
-                    | if m { Access::MKNOD } else { Access::empty() },
+                access,
             )?;
 
             Ok(())

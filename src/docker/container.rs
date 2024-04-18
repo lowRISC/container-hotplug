@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
-use super::{IoStream, IoStreamSource};
+use super::IoStream;
 use crate::cgroup::{
     Access, DeviceAccessController, DeviceAccessControllerV1, DeviceAccessControllerV2, DeviceType,
 };
@@ -122,7 +122,7 @@ impl Container {
         Ok(IoStream {
             output: response.output,
             input: response.input,
-            source: IoStreamSource::Container(self.id.clone()),
+            id: self.id.clone(),
             docker: self.docker.clone(),
         })
     }

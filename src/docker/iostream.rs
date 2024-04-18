@@ -10,15 +10,10 @@ use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::io::ReaderStream;
 
-pub(super) enum IoStreamSource {
-    Container(String),
-    Exec(String),
-}
-
 pub struct IoStream {
     pub output: std::pin::Pin<Box<dyn Stream<Item = Result<LogOutput, Error>> + Send>>,
     pub input: Pin<Box<dyn AsyncWrite + Send>>,
-    pub(super) source: IoStreamSource,
+    pub(super) id: String,
     pub(super) docker: bollard::Docker,
 }
 
@@ -30,14 +25,6 @@ enum StreamData {
 }
 
 impl IoStream {
-    pub async fn collect(mut self) -> Result<String> {
-        let mut result = String::default();
-        while let Some(output) = self.output.next().await {
-            result.push_str(&output?.to_string());
-        }
-        Ok(result)
-    }
-
     pub fn pipe_std(self) -> JoinHandle<Result<()>> {
         let stdin = crate::util::tty_mode_guard::TtyModeGuard::new(tokio::io::stdin(), |mode| {
             // Switch input to raw mode, but don't touch output modes (as it can also be connected
@@ -72,7 +59,7 @@ impl IoStream {
     ) -> JoinHandle<Result<()>> {
         let mut input = self.input;
         let docker = self.docker;
-        let source = self.source;
+        let id = self.id;
 
         let resize_stream = resize_stream.map(|data| {
             let (rows, cols) = data.context("Listening for tty resize")?;
@@ -101,7 +88,7 @@ impl IoStream {
             while let Some(data) = streams.next().await {
                 match data? {
                     StreamData::Resize(rows, cols) => {
-                        resize_tty(&docker, &source, (rows, cols)).await?;
+                        resize_tty(&docker, &id, (rows, cols)).await?;
                     }
                     StreamData::StdIn(mut buf) => {
                         input.write_all_buf(&mut buf).await?;
@@ -123,26 +110,11 @@ impl IoStream {
     }
 }
 
-async fn resize_tty(
-    docker: &bollard::Docker,
-    source: &IoStreamSource,
-    (rows, cols): (u16, u16),
-) -> Result<()> {
-    match source {
-        IoStreamSource::Container(id) => {
-            let options = bollard::container::ResizeContainerTtyOptions {
-                height: rows,
-                width: cols,
-            };
-            docker.resize_container_tty(id, options).await?;
-        }
-        IoStreamSource::Exec(id) => {
-            let options = bollard::exec::ResizeExecOptions {
-                height: rows,
-                width: cols,
-            };
-            docker.resize_exec(id, options).await?;
-        }
+async fn resize_tty(docker: &bollard::Docker, id: &str, (rows, cols): (u16, u16)) -> Result<()> {
+    let options = bollard::container::ResizeContainerTtyOptions {
+        height: rows,
+        width: cols,
     };
+    docker.resize_container_tty(id, options).await?;
     Ok(())
 }

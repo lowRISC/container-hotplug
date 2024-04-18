@@ -1,9 +1,10 @@
 use anyhow::{bail, ensure, Context, Result};
 use aya::maps::{HashMap, MapData};
 use aya::programs::{CgroupDevice, Link};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::mem::ManuallyDrop;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // The numerical representation below needs to match BPF_DEVCG constants.
 #[allow(unused)]
@@ -41,16 +42,16 @@ pub struct DeviceAccessControllerV1 {
 }
 
 impl DeviceAccessControllerV1 {
-    pub fn new(id: &str) -> Result<Self> {
-        let cgroup: PathBuf = format!("/sys/fs/cgroup/devices/docker/{id}").into();
-
+    pub fn new(cgroup: &Path) -> Result<Self> {
         ensure!(
             cgroup.is_dir(),
             "cgroup {} does not exist",
             cgroup.display()
         );
 
-        Ok(Self { cgroup })
+        Ok(Self {
+            cgroup: cgroup.to_owned(),
+        })
     }
 }
 
@@ -127,11 +128,18 @@ pub struct DeviceAccessControllerV2 {
 }
 
 impl DeviceAccessControllerV2 {
-    pub fn new(id: &str) -> Result<Self> {
+    pub fn new(cgroup: &Path) -> Result<Self> {
+        // cgroup is of form "/sys/fs/cgroup/system.slice/xxx-yyy.scope", and we can use
+        // the last part as unique identifier.
+        let id = cgroup
+            .file_name()
+            .and_then(OsStr::to_str)
+            .context("Invalid cgroup path")?
+            .trim_end_matches(".scope");
+
         // We want to take control of the device cgroup filtering from docker. To do this, we attach our own
         // filter program and detach the one by docker.
-        let cgroup_path = format!("/sys/fs/cgroup/system.slice/docker-{id}.scope");
-        let cgroup = File::open(cgroup_path)?;
+        let cgroup_fd = File::open(cgroup)?;
 
         let mut bpf = aya::Bpf::load(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -147,13 +155,14 @@ impl DeviceAccessControllerV2 {
 
         // Iterate existing programs. We'll need to detach them later.
         // Wrap this inside `ManuallyDrop` to prevent accidental detaching.
-        let existing_programs = ManuallyDrop::new(CgroupDevice::query(&cgroup)?);
+        let existing_programs = ManuallyDrop::new(CgroupDevice::query(&cgroup_fd)?);
 
-        program.attach(&cgroup)?;
+        program.attach(&cgroup_fd)?;
 
         // Pin the program so that if container-hotplug accidentally exits, the filter won't be removed from the docker
         // container.
-        let pin: PathBuf = format!("/sys/fs/bpf/docker-{id}-device-filter").into();
+        let pin: PathBuf = format!("/sys/fs/bpf/{id}-device-filter").into();
+        let _ = std::fs::remove_file(&pin);
         program.pin(&pin)?;
 
         // Now our new filter is attached, detach all docker filters.

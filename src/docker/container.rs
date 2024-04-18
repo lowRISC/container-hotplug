@@ -44,9 +44,13 @@ impl Container {
             .shared();
 
         let cgroup_device_filter: Box<dyn DeviceAccessController + Send> =
-            match DeviceAccessControllerV2::new(&id) {
+            match DeviceAccessControllerV2::new(
+                format!("/sys/fs/cgroup/system.slice/docker-{id}.scope").as_ref(),
+            ) {
                 Ok(v) => Box::new(v),
-                Err(err2) => match DeviceAccessControllerV1::new(&id) {
+                Err(err2) => match DeviceAccessControllerV1::new(
+                    format!("/sys/fs/cgroup/devices/docker/{id}").as_ref(),
+                ) {
                     Ok(v) => Box::new(v),
                     Err(err1) => {
                         log::error!("neither cgroup v1 and cgroup v2 works");

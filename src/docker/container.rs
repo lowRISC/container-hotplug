@@ -1,3 +1,4 @@
+use std::mem::ManuallyDrop;
 use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,7 +23,7 @@ pub struct Container {
     id: String,
     user: String,
     remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
-    cgroup_device_filter: Arc<Mutex<Option<Box<dyn DeviceAccessController + Send>>>>,
+    cgroup_device_filter: Arc<Mutex<Option<ManuallyDrop<Box<dyn DeviceAccessController + Send>>>>>,
 }
 
 impl Container {
@@ -60,6 +61,10 @@ impl Container {
                     }
                 },
             };
+
+        // Dropping the device filter will cause the container to have arbitrary device access.
+        // So keep it alive until we're sure that the container is stopped.
+        let cgroup_device_filter = ManuallyDrop::new(cgroup_device_filter);
 
         Ok(Self {
             docker: docker.clone(),
@@ -109,12 +114,9 @@ impl Container {
         }
 
         // Stop the cgroup device filter. Only do so once we're sure that the container is removed.
-        self.cgroup_device_filter
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap()
-            .stop()?;
+        drop(ManuallyDrop::into_inner(
+            self.cgroup_device_filter.lock().unwrap().take().unwrap(),
+        ));
 
         Ok(())
     }

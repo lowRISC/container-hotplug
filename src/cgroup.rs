@@ -31,10 +31,6 @@ pub trait DeviceAccessController {
         minor: u32,
         access: Access,
     ) -> Result<()>;
-
-    /// Stop performing access control. This may allow all accesses, so should only be used when
-    /// the cgroup is shutdown.
-    fn stop(self: Box<Self>) -> Result<()>;
 }
 
 pub struct DeviceAccessControllerV1 {
@@ -103,10 +99,6 @@ impl DeviceAccessController for DeviceAccessControllerV1 {
             )?;
         }
 
-        Ok(())
-    }
-
-    fn stop(self: Box<Self>) -> Result<()> {
         Ok(())
     }
 }
@@ -179,6 +171,12 @@ impl DeviceAccessControllerV2 {
     }
 }
 
+impl Drop for DeviceAccessControllerV2 {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.pin);
+    }
+}
+
 impl DeviceAccessController for DeviceAccessControllerV2 {
     fn set_permission(
         &mut self,
@@ -199,11 +197,6 @@ impl DeviceAccessController for DeviceAccessControllerV2 {
         }
         Ok(())
     }
-
-    fn stop(self: Box<Self>) -> Result<()> {
-        CgroupDevice::from_pin(&self.pin)?.unpin()?;
-        Ok(())
-    }
 }
 
 pub struct DeviceAccessControllerDummy;
@@ -217,9 +210,5 @@ impl DeviceAccessController for DeviceAccessControllerDummy {
         _access: Access,
     ) -> Result<()> {
         bail!("neither cgroup v1 and cgroup v2 works");
-    }
-
-    fn stop(self: Box<Self>) -> Result<()> {
-        Ok(())
     }
 }

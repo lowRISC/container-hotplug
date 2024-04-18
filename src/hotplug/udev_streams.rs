@@ -1,4 +1,4 @@
-use super::PluggableDevice;
+use crate::dev::Device as PluggableDevice;
 
 use anyhow::Result;
 use async_stream::try_stream;
@@ -18,7 +18,7 @@ pub fn enumerate(hub_path: PathBuf) -> impl tokio_stream::Stream<Item = Result<P
         let devices = enumerator
             .scan_devices()?
             .filter(|device| device.syspath().starts_with(&hub_path))
-            .filter_map(|device| PluggableDevice::from_device(&device));
+            .filter_map(|device| PluggableDevice::from_udev(&device));
 
         for device in devices {
             yield device;
@@ -35,7 +35,7 @@ pub fn monitor(hub_path: PathBuf) -> impl tokio_stream::Stream<Item = Result<Ude
             if let Ok(Ok(event)) = guard.try_io(|socket| socket.get_ref().iter().next().ok_or_else(|| WouldBlock.into())) {
                 match event.event_type() {
                     EventType::Add if event.syspath().starts_with(&hub_path) => {
-                        if let Some(device) = PluggableDevice::from_device(event.deref()) {
+                        if let Some(device) = PluggableDevice::from_udev(event.deref()) {
                             yield UdevEvent::Add(device);
                         }
                     }

@@ -1,5 +1,6 @@
 mod cgroup;
 mod cli;
+mod dev;
 mod docker;
 mod hotplug;
 mod util;
@@ -67,7 +68,7 @@ fn run_hotplug(
         info!("Attaching to container {name} ({id})");
 
         let hub_path = device.hub()?.syspath().to_owned();
-        let device = PluggableDevice::from_device(&device.device()?)
+        let device = PluggableDevice::from_udev(&device.device()?)
             .context("Failed to obtain basic device information")?;
 
         let mut hotplug = HotPlug::new(container.clone(), device, hub_path.clone(), symlinks)?;

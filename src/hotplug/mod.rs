@@ -1,4 +1,3 @@
-mod pluggable_device;
 mod plugged_device;
 mod udev_streams;
 
@@ -17,7 +16,7 @@ use tokio_stream::StreamExt;
 
 use udev::Device;
 
-pub use pluggable_device::PluggableDevice;
+pub use crate::dev::Device as PluggableDevice;
 pub use plugged_device::PluggedDevice;
 
 use self::udev_streams::UdevEvent;
@@ -62,7 +61,7 @@ impl HotPlug {
     fn find_symlink(&self, device: &PluggableDevice) -> Option<PathBuf> {
         self.symlinks
             .iter()
-            .find_map(|dev| dev.matches(device.device()))
+            .find_map(|dev| dev.matches(device.udev()))
     }
 
     pub fn start(&mut self) -> impl tokio_stream::Stream<Item = Result<Event>> + '_ {
@@ -87,7 +86,7 @@ impl HotPlug {
             while let Some(event) = self.monitor.next().await {
                 match event? {
                     UdevEvent::Add(device) => {
-                        if let Some(_plugged) = self.deny_device(device.device()).await? {
+                        if let Some(_plugged) = self.deny_device(device.udev()).await? {
                             // yield Event::Remove(plugged);
                         }
                         let device = self.allow_device(&device).await?;

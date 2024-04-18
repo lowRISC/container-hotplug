@@ -1,16 +1,15 @@
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
-use udev::Device;
 
 #[derive(Debug, Clone)]
-pub struct PluggableDevice {
-    pub(super) device: Device,
+pub struct Device {
+    pub(super) device: udev::Device,
     pub(super) devnum: (u32, u32),
     pub(super) devnode: PathBuf,
 }
 
-impl PluggableDevice {
-    pub fn from_device(device: &Device) -> Option<Self> {
+impl Device {
+    pub fn from_udev(device: &udev::Device) -> Option<Self> {
         let device = device.clone();
         let devnum = device.devnum()?;
         let major = rustix::fs::major(devnum);
@@ -47,7 +46,7 @@ impl PluggableDevice {
             .or_else(|| self.display_name_from_props())
     }
 
-    pub fn device(&self) -> &Device {
+    pub fn udev(&self) -> &udev::Device {
         &self.device
     }
 
@@ -64,7 +63,7 @@ impl PluggableDevice {
     }
 }
 
-impl Display for PluggableDevice {
+impl Display for Device {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let (major, minor) = self.devnum();
         let name = self.display_name().unwrap_or(String::from("Unknown"));

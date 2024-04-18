@@ -14,9 +14,7 @@ use std::path::PathBuf;
 
 use tokio_stream::StreamExt;
 
-use udev::Device;
-
-pub use crate::dev::Device as PluggableDevice;
+pub use crate::dev::Device;
 pub use plugged_device::PluggedDevice;
 
 use self::udev_streams::UdevEvent;
@@ -55,10 +53,8 @@ impl HotPlug {
         })
     }
 
-    fn find_symlink(&self, device: &PluggableDevice) -> Option<PathBuf> {
-        self.symlinks
-            .iter()
-            .find_map(|dev| dev.matches(device.udev()))
+    fn find_symlink(&self, device: &Device) -> Option<PathBuf> {
+        self.symlinks.iter().find_map(|dev| dev.matches(device))
     }
 
     pub fn start(&mut self) -> impl tokio_stream::Stream<Item = Result<Event>> + '_ {
@@ -66,8 +62,10 @@ impl HotPlug {
             let enumerate = udev_streams::enumerate(self.hub_path.clone());
 
             tokio::pin!(enumerate);
-            while let Some(device) = enumerate.next().await {
-                let device = device?;
+            while let Some(device) = enumerate.try_next().await? {
+                if device.devnode().is_none() {
+                    continue;
+                }
                 let device = self.allow_device(&device).await?;
                 yield Event::Add(device);
             }
@@ -76,9 +74,12 @@ impl HotPlug {
 
     pub fn run(&mut self) -> impl tokio_stream::Stream<Item = Result<Event>> + '_ {
         try_stream! {
-            while let Some(event) = self.monitor.next().await {
-                match event? {
+            while let Some(event) = self.monitor.try_next().await? {
+                match event {
                     UdevEvent::Add(device) => {
+                        if device.devnode().is_none() {
+                            continue;
+                        }
                         if let Some(_plugged) = self.deny_device(device.udev()).await? {
                             // yield Event::Remove(plugged);
                         }
@@ -95,31 +96,31 @@ impl HotPlug {
         }
     }
 
-    async fn allow_device(&mut self, device: &PluggableDevice) -> Result<PluggedDevice> {
+    async fn allow_device(&mut self, device: &Device) -> Result<PluggedDevice> {
         let device = device.clone();
         let symlink = self.find_symlink(&device);
         let device = PluggedDevice { device, symlink };
+        let devnode = device.devnode().unwrap();
         self.container
-            .device(device.devnum(), (true, true, true))
+            .device(devnode.devnum, (true, true, true))
             .await?;
-        self.container
-            .mknod(device.devnode(), device.devnum())
-            .await?;
+        self.container.mknod(&devnode.path, devnode.devnum).await?;
         if let Some(symlink) = device.symlink() {
-            self.container.symlink(device.devnode(), symlink).await?;
+            self.container.symlink(&devnode.path, symlink).await?;
         }
         let syspath = device.syspath().to_owned();
         self.devices.insert(syspath, device.clone());
         Ok(device)
     }
 
-    async fn deny_device(&mut self, device: &Device) -> Result<Option<PluggedDevice>> {
+    async fn deny_device(&mut self, device: &udev::Device) -> Result<Option<PluggedDevice>> {
         let syspath = device.syspath().to_owned();
         if let Some(device) = self.devices.remove(&syspath) {
+            let devnode = device.devnode().unwrap();
             self.container
-                .device(device.devnum(), (false, false, false))
+                .device(devnode.devnum, (false, false, false))
                 .await?;
-            self.container.rm(device.devnode()).await?;
+            self.container.rm(&devnode.path).await?;
             if let Some(symlink) = device.symlink() {
                 self.container.rm(symlink).await?;
             }

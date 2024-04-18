@@ -3,6 +3,8 @@ use std::str::FromStr;
 
 use anyhow::{bail, ensure, Error, Result};
 
+use crate::dev::Device;
+
 #[derive(Clone)]
 pub enum SymlinkDevice {
     Usb {
@@ -95,13 +97,13 @@ impl SymlinkDevice {
         Some(matches)
     }
 
-    pub fn matches(&self, device: &udev::Device) -> bool {
-        self.matches_impl(device).unwrap_or(false)
+    pub fn matches(&self, device: &Device) -> bool {
+        self.matches_impl(device.udev()).unwrap_or(false)
     }
 }
 
 impl Symlink {
-    pub fn matches(&self, device: &udev::Device) -> Option<PathBuf> {
+    pub fn matches(&self, device: &Device) -> Option<PathBuf> {
         if self.device.matches(device) {
             Some(self.path.clone())
         } else {

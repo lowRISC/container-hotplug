@@ -5,6 +5,8 @@ use std::str::FromStr;
 use anyhow::{bail, ensure, Context, Error, Result};
 use udev::Enumerator;
 
+use crate::dev::Device;
+
 /// A reference to a device.
 #[derive(Clone)]
 pub struct DeviceRef {
@@ -145,7 +147,7 @@ impl Display for DeviceRef {
 }
 
 impl DeviceKind {
-    fn device(&self) -> Result<udev::Device> {
+    fn device(&self) -> Result<Device> {
         let dev = match &self {
             DeviceKind::Usb { vid, pid, serial } => {
                 let mut enumerator = Enumerator::new()?;
@@ -180,17 +182,17 @@ impl DeviceKind {
                     .with_context(|| format!("Failed to find device `{self}`"))?
             }
         };
-        Ok(dev)
+        Ok(Device::from_udev(dev))
     }
 }
 
 impl DeviceRef {
-    pub fn device(&self) -> Result<udev::Device> {
+    pub fn device(&self) -> Result<Device> {
         let mut device = self.kind.device()?;
         for _ in 0..self.parent_level {
-            device = device.parent().with_context(|| {
+            device = Device::from_udev(device.udev().parent().with_context(|| {
                 format!("Failed to obtain parent device while resolving `{self}`")
-            })?;
+            })?);
         }
         Ok(device)
     }

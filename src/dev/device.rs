@@ -2,24 +2,32 @@ use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
+pub struct DevNode {
+    pub path: PathBuf,
+    pub devnum: (u32, u32),
+}
+
+#[derive(Debug, Clone)]
 pub struct Device {
-    pub(super) device: udev::Device,
-    pub(super) devnum: (u32, u32),
-    pub(super) devnode: PathBuf,
+    device: udev::Device,
+    // Cache devnum/devnode for the device as they can become unavailable when removing devices.
+    devnode: Option<DevNode>,
 }
 
 impl Device {
-    pub fn from_udev(device: &udev::Device) -> Option<Self> {
-        let device = device.clone();
-        let devnum = device.devnum()?;
-        let major = rustix::fs::major(devnum);
-        let minor = rustix::fs::minor(devnum);
-        let devnode = device.devnode()?.to_owned();
-        Some(Self {
-            device,
-            devnum: (major, minor),
-            devnode,
-        })
+    pub fn from_udev(device: udev::Device) -> Self {
+        let devnode = device
+            .devnum()
+            .zip(device.devnode())
+            .map(|(devnum, devnode)| {
+                let major = rustix::fs::major(devnum);
+                let minor = rustix::fs::minor(devnum);
+                DevNode {
+                    path: devnode.to_owned(),
+                    devnum: (major, minor),
+                }
+            });
+        Self { device, devnode }
     }
 
     fn display_name_from_db(&self) -> Option<String> {
@@ -54,21 +62,29 @@ impl Device {
         self.device.syspath()
     }
 
-    pub fn devnum(&self) -> (u32, u32) {
-        self.devnum
-    }
-
-    pub fn devnode(&self) -> &PathBuf {
-        &self.devnode
+    pub fn devnode(&self) -> Option<&DevNode> {
+        self.devnode.as_ref()
     }
 }
 
 impl Display for Device {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let (major, minor) = self.devnum();
-        let name = self.display_name().unwrap_or(String::from("Unknown"));
-        let devnode = self.devnode().display();
-        write!(f, "{major:0>3}:{minor:0>3} ({name}) [{devnode}]")?;
+        if let Some(devnode) = self.devnode() {
+            let (major, minor) = devnode.devnum;
+            write!(f, "{major:0>3}:{minor:0>3}")?;
+        } else {
+            write!(f, "  -:-  ")?;
+        }
+        if let Some(name) = self.display_name() {
+            write!(f, " ({name})")?;
+        } else {
+            write!(f, " (Unknown)")?;
+        }
+        if let Some(devnode) = self.devnode() {
+            write!(f, " [{}]", devnode.path.display())?;
+        } else {
+            write!(f, " [{}]", self.syspath().display())?;
+        }
         Ok(())
     }
 }

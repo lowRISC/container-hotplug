@@ -1,24 +1,18 @@
 mod plugged_device;
-mod udev_streams;
 
 use crate::cgroup::Access;
 use crate::cli;
+use crate::dev::DeviceMonitor;
 use crate::docker::Container;
 
-use async_stream::try_stream;
-
 use anyhow::Result;
-use futures::stream::LocalBoxStream;
-
+use async_stream::try_stream;
 use std::collections::HashMap;
 use std::path::PathBuf;
-
 use tokio_stream::StreamExt;
 
-pub use crate::dev::Device;
+pub use crate::dev::{Device, DeviceEvent};
 pub use plugged_device::PluggedDevice;
-
-use self::udev_streams::UdevEvent;
 
 #[derive(Clone)]
 pub enum Event {
@@ -28,9 +22,8 @@ pub enum Event {
 
 pub struct HotPlug {
     pub container: Container,
-    pub hub_path: PathBuf,
     symlinks: Vec<cli::Symlink>,
-    monitor: LocalBoxStream<'static, Result<UdevEvent>>,
+    monitor: DeviceMonitor,
     devices: HashMap<PathBuf, PluggedDevice>,
 }
 
@@ -40,14 +33,11 @@ impl HotPlug {
         hub_path: PathBuf,
         symlinks: Vec<cli::Symlink>,
     ) -> Result<Self> {
-        let monitor = udev_streams::monitor(hub_path.clone());
-        let monitor = Box::pin(monitor);
-
+        let monitor = DeviceMonitor::new(hub_path.clone())?;
         let devices = Default::default();
 
         Ok(Self {
             container,
-            hub_path,
             symlinks,
             monitor,
             devices,
@@ -60,15 +50,21 @@ impl HotPlug {
 
     pub fn start(&mut self) -> impl tokio_stream::Stream<Item = Result<Event>> + '_ {
         try_stream! {
-            let enumerate = udev_streams::enumerate(self.hub_path.clone());
-
-            tokio::pin!(enumerate);
-            while let Some(device) = enumerate.try_next().await? {
-                if device.devnode().is_none() {
-                    continue;
+            while let Some(event) = self.monitor.try_read()? {
+                match event {
+                    DeviceEvent::Add(device) => {
+                        if device.devnode().is_none() {
+                            continue;
+                        }
+                        let device = self.allow_device(&device).await?;
+                        yield Event::Add(device);
+                    }
+                    DeviceEvent::Remove(device) => {
+                        if let Some(plugged) = self.deny_device(device.udev()).await? {
+                            yield Event::Remove(plugged);
+                        }
+                    }
                 }
-                let device = self.allow_device(&device).await?;
-                yield Event::Add(device);
             }
         }
     }
@@ -77,18 +73,15 @@ impl HotPlug {
         try_stream! {
             while let Some(event) = self.monitor.try_next().await? {
                 match event {
-                    UdevEvent::Add(device) => {
+                    DeviceEvent::Add(device) => {
                         if device.devnode().is_none() {
                             continue;
-                        }
-                        if let Some(_plugged) = self.deny_device(device.udev()).await? {
-                            // yield Event::Remove(plugged);
                         }
                         let device = self.allow_device(&device).await?;
                         yield Event::Add(device);
                     }
-                    UdevEvent::Remove(device) => {
-                        if let Some(plugged) = self.deny_device(&device).await? {
+                    DeviceEvent::Remove(device) => {
+                        if let Some(plugged) = self.deny_device(device.udev()).await? {
                             yield Event::Remove(plugged);
                         }
                     }

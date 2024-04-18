@@ -7,7 +7,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 
-pub use device::Device;
+pub use device::DeviceRef;
 pub use logfmt::LogFormat;
 pub use symlink::Symlink;
 
@@ -59,7 +59,7 @@ pub struct Run {
     ///  - syspath: A directory path in /sys/** {n}
     ///  - devnode: A device path in /dev/** {n}
     /// e.g., parent-of:usb:2b3e:c310
-    pub root_device: Device,
+    pub root_device: DeviceRef,
 
     #[arg(short = 'l', long, id = "SYMLINK")]
     /// Create a symlink for a device: <PREFIX>:<DEVICE>=<PATH> {n}

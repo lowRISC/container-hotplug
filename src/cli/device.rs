@@ -5,8 +5,9 @@ use std::str::FromStr;
 use anyhow::{bail, ensure, Context, Error, Result};
 use udev::Enumerator;
 
+/// A reference to a device.
 #[derive(Clone)]
-pub struct Device {
+pub struct DeviceRef {
     parent_level: usize,
     kind: DeviceKind,
 }
@@ -26,7 +27,7 @@ fn is_hex4(val: &str) -> bool {
     val.len() == 4 && val.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-impl FromStr for Device {
+impl FromStr for DeviceRef {
     type Err = Error;
 
     fn from_str(mut s: &str) -> Result<Self> {
@@ -104,7 +105,7 @@ impl FromStr for Device {
             }
         };
 
-        Ok(Device {
+        Ok(DeviceRef {
             parent_level,
             kind: device,
         })
@@ -134,7 +135,7 @@ impl Display for DeviceKind {
     }
 }
 
-impl Display for Device {
+impl Display for DeviceRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for _ in 0..self.parent_level {
             write!(f, "parent-of:")?;
@@ -183,7 +184,7 @@ impl DeviceKind {
     }
 }
 
-impl Device {
+impl DeviceRef {
     pub fn device(&self) -> Result<udev::Device> {
         let device = self.kind.device()?;
         Ok(device)

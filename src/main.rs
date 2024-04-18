@@ -4,7 +4,7 @@ mod docker;
 mod hotplug;
 mod util;
 
-use cli::{Action, Device, Symlink};
+use cli::{Action, DeviceRef, Symlink};
 use docker::{Container, Docker};
 use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
 
@@ -56,7 +56,7 @@ impl Display for Event {
 }
 
 fn run_hotplug(
-    device: Device,
+    device: DeviceRef,
     symlinks: Vec<Symlink>,
     container: Container,
     verbosity: Verbosity<impl LogLevel>,

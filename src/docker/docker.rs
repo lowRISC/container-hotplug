@@ -16,7 +16,12 @@ impl Docker {
             .config
             .context("Failed to obtain container config")?;
         let user = config.user.context("Failed to obtain container user")?;
-        Container::new(&self.0, id, user)
+        let pid = response
+            .state
+            .context("Failed to obtain container state")?
+            .pid
+            .context("Failed to obtain container pid")?;
+        Container::new(&self.0, id, pid.try_into()?, user)
     }
 
     pub async fn run<U: AsRef<str>, T: AsRef<[U]>>(&self, args: T) -> Result<Container> {

@@ -3,7 +3,7 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Error, Result};
-use rustix::process::Signal;
+use rustix::process::{Pid, Signal};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -17,12 +17,18 @@ use crate::cgroup::{
 pub struct Container {
     docker: bollard::Docker,
     id: String,
+    pid: Pid,
     user: String,
     cgroup_device_filter: Mutex<Option<Box<dyn DeviceAccessController + Send>>>,
 }
 
 impl Container {
-    pub(super) fn new(docker: &bollard::Docker, id: String, user: String) -> Result<Self> {
+    pub(super) fn new(
+        docker: &bollard::Docker,
+        id: String,
+        pid: u32,
+        user: String,
+    ) -> Result<Self> {
         // Dropping the device filter will cause the container to have arbitrary device access.
         // So keep it alive until we're sure that the container is stopped.
         let cgroup_device_filter: Option<Box<dyn DeviceAccessController + Send>> =
@@ -46,6 +52,7 @@ impl Container {
         Ok(Self {
             docker: docker.clone(),
             id,
+            pid: Pid::from_raw(pid.try_into()?).context("Invalid PID")?,
             user: if user.is_empty() {
                 // If user is not specified, use root.
                 "root".to_owned()
@@ -125,10 +132,7 @@ impl Container {
     }
 
     pub async fn kill(&self, signal: Signal) -> Result<()> {
-        let options = bollard::container::KillContainerOptions {
-            signal: format!("{}", signal as i32),
-        };
-        self.docker.kill_container(&self.id, Some(options)).await?;
+        rustix::process::kill_process(self.pid, signal).context("Failed to kill container init")?;
         Ok(())
     }
 

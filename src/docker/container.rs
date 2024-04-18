@@ -1,4 +1,5 @@
 use std::mem::ManuallyDrop;
+use std::path::Path;
 use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -245,8 +246,9 @@ impl Container {
         Ok(())
     }
 
-    pub async fn mknod(&self, node: &str, (major, minor): (u32, u32)) -> Result<()> {
+    pub async fn mknod(&self, node: &Path, (major, minor): (u32, u32)) -> Result<()> {
         self.rm(node).await?;
+        let node = node.to_str().context("node is not UTF-8")?;
         self.mkdir_for(node).await?;
         self.exec_as_root(&["mknod", node, "c", &major.to_string(), &minor.to_string()])
             .await?
@@ -256,7 +258,9 @@ impl Container {
         Ok(())
     }
 
-    pub async fn symlink(&self, source: &str, link: &str) -> Result<()> {
+    pub async fn symlink(&self, source: &Path, link: &Path) -> Result<()> {
+        let source = source.to_str().context("node is not UTF-8")?;
+        let link = link.to_str().context("symlink is not UTF-8")?;
         self.mkdir_for(link).await?;
         self.exec_as_root(&["ln", "-sf", source, link])
             .await?
@@ -266,7 +270,8 @@ impl Container {
         Ok(())
     }
 
-    pub async fn rm(&self, node: &str) -> Result<()> {
+    pub async fn rm(&self, node: &Path) -> Result<()> {
+        let node = node.to_str().context("node is not UTF-8")?;
         self.exec_as_root(&["rm", "-f", node])
             .await?
             .collect()

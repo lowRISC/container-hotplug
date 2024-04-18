@@ -29,7 +29,6 @@ pub enum Event {
 
 pub struct HotPlug {
     pub container: Container,
-    pub device: PluggableDevice,
     pub hub_path: PathBuf,
     symlinks: Vec<cli::Symlink>,
     monitor: LocalBoxStream<'static, Result<UdevEvent>>,
@@ -39,7 +38,6 @@ pub struct HotPlug {
 impl HotPlug {
     pub fn new(
         container: Container,
-        device: PluggableDevice,
         hub_path: PathBuf,
         symlinks: Vec<cli::Symlink>,
     ) -> Result<Self> {
@@ -50,7 +48,6 @@ impl HotPlug {
 
         Ok(Self {
             container,
-            device,
             hub_path,
             symlinks,
             monitor,
@@ -66,10 +63,6 @@ impl HotPlug {
 
     pub fn start(&mut self) -> impl tokio_stream::Stream<Item = Result<Event>> + '_ {
         try_stream! {
-            let dev = self.device.clone();
-            let dev = self.allow_device(&dev).await?;
-            yield Event::Add(dev);
-
             let enumerate = udev_streams::enumerate(self.hub_path.clone());
 
             tokio::pin!(enumerate);

@@ -13,12 +13,10 @@ use std::fmt::Display;
 use std::pin::pin;
 use tokio_stream::StreamExt;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use clap_verbosity_flag::{InfoLevel, LogLevel, Verbosity};
 use log::info;
-
-use crate::hotplug::PluggableDevice;
 
 #[derive(Clone)]
 enum Event {
@@ -67,11 +65,8 @@ fn run_hotplug(
         let id = container.id();
         info!("Attaching to container {name} ({id})");
 
-        let hub_path = device.hub()?.syspath().to_owned();
-        let device = PluggableDevice::from_udev(&device.device()?)
-            .context("Failed to obtain basic device information")?;
-
-        let mut hotplug = HotPlug::new(container.clone(), device, hub_path.clone(), symlinks)?;
+        let hub_path = device.device()?.syspath().to_owned();
+        let mut hotplug = HotPlug::new(container.clone(), hub_path.clone(), symlinks)?;
 
         {
             let events = hotplug.start();
@@ -104,7 +99,7 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
     let container = docker.run(param.docker_args).await?;
     drop(container.pipe_signals());
 
-    let hub_path = param.root_device.hub()?.syspath().to_owned();
+    let hub_path = param.root_device.device()?.syspath().to_owned();
     let hotplug_stream = run_hotplug(
         param.root_device,
         param.symlink,

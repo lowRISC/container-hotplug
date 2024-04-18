@@ -186,12 +186,7 @@ impl DeviceKind {
 
 impl DeviceRef {
     pub fn device(&self) -> Result<udev::Device> {
-        let device = self.kind.device()?;
-        Ok(device)
-    }
-
-    pub fn hub(&self) -> Result<udev::Device> {
-        let mut device = self.device()?;
+        let mut device = self.kind.device()?;
         for _ in 0..self.parent_level {
             device = device.parent().with_context(|| {
                 format!("Failed to obtain parent device while resolving `{self}`")

@@ -1,3 +1,4 @@
+mod cgroup;
 mod cli;
 mod docker;
 mod hotplug;

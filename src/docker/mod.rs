@@ -1,4 +1,3 @@
-mod cgroup;
 mod container;
 mod docker;
 mod iostream;

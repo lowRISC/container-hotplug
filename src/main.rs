@@ -23,8 +23,8 @@ use crate::hotplug::PluggableDevice;
 enum Event {
     Add(PluggedDevice),
     Remove(PluggedDevice),
-    Initialized(Container),
-    Stopped(Container, i64),
+    Initialized,
+    Stopped(i64),
 }
 
 impl From<HotPlugEvent> for Event {
@@ -45,10 +45,10 @@ impl Display for Event {
             Event::Remove(dev) => {
                 write!(f, "Detaching device {dev}")
             }
-            Event::Initialized(_) => {
+            Event::Initialized => {
                 write!(f, "Container initialized")
             }
-            Event::Stopped(_, status) => {
+            Event::Stopped(status) => {
                 write!(f, "Container exited with status {status}")
             }
         }
@@ -80,7 +80,7 @@ fn run_hotplug(
             }
         }
 
-        yield Event::Initialized(container.clone());
+        yield Event::Initialized;
 
         if !verbosity.is_silent() {
             container.attach().await?.pipe_std();
@@ -114,7 +114,7 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
         let container = container.clone();
         async_stream::try_stream! {
             let status = container.wait().await?;
-            yield Event::Stopped(container.clone(), status)
+            yield Event::Stopped(status)
         }
     };
 
@@ -134,7 +134,7 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
                     container.kill(15).await?;
                     break;
                 }
-                Event::Stopped(_, code) => {
+                Event::Stopped(code) => {
                     status = 1;
                     if let Ok(code) = u8::try_from(code) {
                         // Use the container exit code, but only if it won't be confused

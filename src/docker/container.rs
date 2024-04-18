@@ -2,7 +2,8 @@ use std::path::Path;
 use std::pin::pin;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, ensure, Context, Error, Result};
+use rustix::fs::{Gid, Uid};
 use rustix::process::{Pid, Signal};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
@@ -18,17 +19,13 @@ pub struct Container {
     docker: bollard::Docker,
     id: String,
     pid: Pid,
-    user: String,
+    uid: Uid,
+    gid: Gid,
     cgroup_device_filter: Mutex<Option<Box<dyn DeviceAccessController + Send>>>,
 }
 
 impl Container {
-    pub(super) fn new(
-        docker: &bollard::Docker,
-        id: String,
-        pid: u32,
-        user: String,
-    ) -> Result<Self> {
+    pub(super) async fn new(docker: &bollard::Docker, id: String, pid: u32) -> Result<Self> {
         // Dropping the device filter will cause the container to have arbitrary device access.
         // So keep it alive until we're sure that the container is stopped.
         let cgroup_device_filter: Option<Box<dyn DeviceAccessController + Send>> =
@@ -49,22 +46,62 @@ impl Container {
                 },
             };
 
-        Ok(Self {
+        let mut this = Self {
             docker: docker.clone(),
             id,
             pid: Pid::from_raw(pid.try_into()?).context("Invalid PID")?,
-            user: if user.is_empty() {
-                // If user is not specified, use root.
-                "root".to_owned()
-            } else {
-                user
-            },
+            uid: Uid::ROOT,
+            gid: Gid::ROOT,
             cgroup_device_filter: Mutex::new(cgroup_device_filter),
-        })
+        };
+
+        let uid = this.exec(&["id", "-u"]).await?.trim().parse()?;
+        let gid = this.exec(&["id", "-g"]).await?.trim().parse()?;
+        // Only invalid uid/gid for Linux is negative one.
+        ensure!(uid != u32::MAX && gid != u32::MAX);
+        // SAFETY: We just checked that the uid/gid is not -1.
+        this.uid = unsafe { Uid::from_raw(uid) };
+        this.gid = unsafe { Gid::from_raw(gid) };
+
+        Ok(this)
     }
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub async fn exec<T: ToString>(&self, cmd: &[T]) -> Result<String> {
+        let cmd = cmd.iter().map(|s| s.to_string()).collect();
+        let options = bollard::exec::CreateExecOptions {
+            cmd: Some(cmd),
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            tty: Some(true),
+            detach_keys: Some("ctrl-c".to_string()),
+            ..Default::default()
+        };
+        let response = self.docker.create_exec::<String>(&self.id, options).await?;
+        let id = response.id;
+
+        let options = bollard::exec::StartExecOptions {
+            detach: false,
+            ..Default::default()
+        };
+        let response = self.docker.start_exec(&id, Some(options)).await?;
+        let bollard::exec::StartExecResults::Attached {
+            input: _,
+            mut output,
+        } = response
+        else {
+            unreachable!("we asked for attached IO streams");
+        };
+
+        let mut result = String::new();
+        while let Some(output) = output.next().await {
+            result.push_str(&output?.to_string());
+        }
+        Ok(result)
     }
 
     pub async fn exec_as_root<T: ToString>(&self, cmd: &[T]) -> Result<IoStream> {
@@ -160,11 +197,16 @@ impl Container {
     }
 
     pub async fn chown_to_user(&self, path: &str) -> Result<()> {
-        // Use `-h` to not follow symlink, and `user:` will use user's login group.
-        self.exec_as_root(&["chown", "-h", &format!("{}:", self.user), path])
-            .await?
-            .collect()
-            .await?;
+        // Use `-h` to not follow symlink
+        self.exec_as_root(&[
+            "chown",
+            "-h",
+            &format!("{}:{}", self.uid.as_raw(), self.gid.as_raw()),
+            path,
+        ])
+        .await?
+        .collect()
+        .await?;
         Ok(())
     }
 

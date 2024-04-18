@@ -12,16 +12,12 @@ impl Docker {
     pub async fn get<T: AsRef<str>>(&self, name: T) -> Result<Container> {
         let response = self.0.inspect_container(name.as_ref(), None).await?;
         let id = response.id.context("Failed to obtain container ID")?;
-        let config = response
-            .config
-            .context("Failed to obtain container config")?;
-        let user = config.user.context("Failed to obtain container user")?;
         let pid = response
             .state
             .context("Failed to obtain container state")?
             .pid
             .context("Failed to obtain container pid")?;
-        Container::new(&self.0, id, pid.try_into()?, user)
+        Container::new(&self.0, id, pid.try_into()?).await
     }
 
     pub async fn run<U: AsRef<str>, T: AsRef<[U]>>(&self, args: T) -> Result<Container> {

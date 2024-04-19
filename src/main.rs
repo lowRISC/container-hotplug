@@ -181,8 +181,8 @@ async fn main() {
     let code = match result {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("Error: {err:?}");
-            1
+            log::error!("{err:?}");
+            125
         }
     };
     // Upon returning from `main`, tokio will attempt to shutdown, but if there're any blocking

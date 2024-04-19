@@ -1,4 +1,4 @@
-mod plugged_device;
+mod attached_device;
 
 use crate::cgroup::Access;
 use crate::cli;
@@ -12,19 +12,19 @@ use std::path::PathBuf;
 use tokio_stream::StreamExt;
 
 pub use crate::dev::{Device, DeviceEvent};
-pub use plugged_device::PluggedDevice;
+pub use attached_device::AttachedDevice;
 
 #[derive(Clone)]
 pub enum Event {
-    Add(PluggedDevice),
-    Remove(PluggedDevice),
+    Attach(AttachedDevice),
+    Detach(AttachedDevice),
 }
 
 pub struct HotPlug {
     pub container: Container,
     symlinks: Vec<cli::Symlink>,
     monitor: DeviceMonitor,
-    devices: HashMap<PathBuf, PluggedDevice>,
+    devices: HashMap<PathBuf, AttachedDevice>,
 }
 
 impl HotPlug {
@@ -60,11 +60,11 @@ impl HotPlug {
                             continue;
                         }
                         let device = self.allow_device(&device).await?;
-                        yield Event::Add(device);
+                        yield Event::Attach(device);
                     }
                     DeviceEvent::Remove(device) => {
                         if let Some(plugged) = self.deny_device(device.udev()).await? {
-                            yield Event::Remove(plugged);
+                            yield Event::Detach(plugged);
                         }
                     }
                 }
@@ -81,11 +81,11 @@ impl HotPlug {
                             continue;
                         }
                         let device = self.allow_device(&device).await?;
-                        yield Event::Add(device);
+                        yield Event::Attach(device);
                     }
                     DeviceEvent::Remove(device) => {
                         if let Some(plugged) = self.deny_device(device.udev()).await? {
-                            yield Event::Remove(plugged);
+                            yield Event::Detach(plugged);
                         }
                     }
                 }
@@ -93,10 +93,10 @@ impl HotPlug {
         }
     }
 
-    async fn allow_device(&mut self, device: &Device) -> Result<PluggedDevice> {
+    async fn allow_device(&mut self, device: &Device) -> Result<AttachedDevice> {
         let device = device.clone();
         let symlinks = self.find_symlinks(&device);
-        let device = PluggedDevice { device, symlinks };
+        let device = AttachedDevice { device, symlinks };
         let devnode = device.devnode().unwrap();
         self.container.device(devnode.devnum, Access::all()).await?;
         self.container.mknod(&devnode.path, devnode.devnum).await?;
@@ -108,7 +108,7 @@ impl HotPlug {
         Ok(device)
     }
 
-    async fn deny_device(&mut self, device: &udev::Device) -> Result<Option<PluggedDevice>> {
+    async fn deny_device(&mut self, device: &udev::Device) -> Result<Option<AttachedDevice>> {
         let syspath = device.syspath().to_owned();
         if let Some(device) = self.devices.remove(&syspath) {
             let devnode = device.devnode().unwrap();

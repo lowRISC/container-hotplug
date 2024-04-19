@@ -7,7 +7,7 @@ mod util;
 
 use cli::{Action, DeviceRef, Symlink};
 use docker::{Container, Docker};
-use hotplug::{Event as HotPlugEvent, HotPlug, PluggedDevice};
+use hotplug::{AttachedDevice, Event as HotPlugEvent, HotPlug};
 
 use std::fmt::Display;
 use std::pin::pin;
@@ -20,8 +20,8 @@ use log::info;
 
 #[derive(Clone)]
 enum Event {
-    Add(PluggedDevice),
-    Remove(PluggedDevice),
+    Attach(AttachedDevice),
+    Detach(AttachedDevice),
     Initialized,
     Stopped(i64),
 }
@@ -29,8 +29,8 @@ enum Event {
 impl From<HotPlugEvent> for Event {
     fn from(evt: HotPlugEvent) -> Self {
         match evt {
-            HotPlugEvent::Add(dev) => Self::Add(dev),
-            HotPlugEvent::Remove(dev) => Self::Remove(dev),
+            HotPlugEvent::Attach(dev) => Self::Attach(dev),
+            HotPlugEvent::Detach(dev) => Self::Detach(dev),
         }
     }
 }
@@ -38,10 +38,10 @@ impl From<HotPlugEvent> for Event {
 impl Display for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Event::Add(dev) => {
+            Event::Attach(dev) => {
                 write!(f, "Attaching device {dev}")
             }
-            Event::Remove(dev) => {
+            Event::Detach(dev) => {
                 write!(f, "Detaching device {dev}")
             }
             Event::Initialized => {
@@ -124,7 +124,7 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
             let event = event?;
             info!("{}", event);
             match event {
-                Event::Remove(dev) if dev.syspath() == hub_path => {
+                Event::Detach(dev) if dev.syspath() == hub_path => {
                     info!("Hub device detached. Stopping container.");
                     status = param.root_unplugged_exit_code;
                     container.kill(15).await?;

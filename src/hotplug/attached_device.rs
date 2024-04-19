@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use crate::dev::Device;
 
 #[derive(Clone)]
-pub struct PluggedDevice {
+pub struct AttachedDevice {
     pub(super) device: Device,
     pub(super) symlinks: Vec<PathBuf>,
 }
 
-impl Deref for PluggedDevice {
+impl Deref for AttachedDevice {
     type Target = Device;
 
     fn deref(&self) -> &Self::Target {
@@ -18,7 +18,7 @@ impl Deref for PluggedDevice {
     }
 }
 
-impl Display for PluggedDevice {
+impl Display for AttachedDevice {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if let Some(devnode) = self.devnode() {
             let (major, minor) = devnode.devnum;

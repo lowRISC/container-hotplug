@@ -44,8 +44,11 @@ impl HotPlug {
         })
     }
 
-    fn find_symlink(&self, device: &Device) -> Option<PathBuf> {
-        self.symlinks.iter().find_map(|dev| dev.matches(device))
+    fn find_symlinks(&self, device: &Device) -> Vec<PathBuf> {
+        self.symlinks
+            .iter()
+            .filter_map(|dev| dev.matches(device))
+            .collect()
     }
 
     pub fn start(&mut self) -> impl tokio_stream::Stream<Item = Result<Event>> + '_ {
@@ -92,12 +95,12 @@ impl HotPlug {
 
     async fn allow_device(&mut self, device: &Device) -> Result<PluggedDevice> {
         let device = device.clone();
-        let symlink = self.find_symlink(&device);
-        let device = PluggedDevice { device, symlink };
+        let symlinks = self.find_symlinks(&device);
+        let device = PluggedDevice { device, symlinks };
         let devnode = device.devnode().unwrap();
         self.container.device(devnode.devnum, Access::all()).await?;
         self.container.mknod(&devnode.path, devnode.devnum).await?;
-        if let Some(symlink) = device.symlink() {
+        for symlink in &device.symlinks {
             self.container.symlink(&devnode.path, symlink).await?;
         }
         let syspath = device.syspath().to_owned();
@@ -113,7 +116,7 @@ impl HotPlug {
                 .device(devnode.devnum, Access::empty())
                 .await?;
             self.container.rm(&devnode.path).await?;
-            if let Some(symlink) = device.symlink() {
+            for symlink in &device.symlinks {
                 self.container.rm(symlink).await?;
             }
             Ok(Some(device))

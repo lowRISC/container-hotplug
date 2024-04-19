@@ -7,19 +7,14 @@ use crate::dev::Device;
 #[derive(Clone)]
 pub struct PluggedDevice {
     pub(super) device: Device,
-    pub(super) symlink: Option<PathBuf>,
+    pub(super) symlinks: Vec<PathBuf>,
 }
 
 impl Deref for PluggedDevice {
     type Target = Device;
+
     fn deref(&self) -> &Self::Target {
         &self.device
-    }
-}
-
-impl PluggedDevice {
-    pub fn symlink(&self) -> Option<&PathBuf> {
-        self.symlink.as_ref()
     }
 }
 
@@ -41,11 +36,10 @@ impl Display for PluggedDevice {
         } else {
             write!(f, " [{}", self.syspath().display())?;
         }
-        if let Some(symlink) = self.symlink() {
-            write!(f, ", {}]", symlink.display())?;
-        } else {
-            write!(f, "]")?;
+        for symlink in &self.symlinks {
+            write!(f, ", {}", symlink.display())?;
         }
+        write!(f, "]")?;
         Ok(())
     }
 }

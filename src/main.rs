@@ -5,9 +5,9 @@ mod docker;
 mod hotplug;
 mod util;
 
-use cli::{Action, DeviceRef, Symlink};
-use docker::{Container, Docker};
-use hotplug::{AttachedDevice, Event as HotPlugEvent, HotPlug};
+use cli::Action;
+use docker::Docker;
+use hotplug::{AttachedDevice, HotPlug};
 
 use std::fmt::Display;
 use std::pin::pin;
@@ -16,7 +16,7 @@ use tokio_stream::StreamExt;
 
 use anyhow::Result;
 use clap::Parser;
-use clap_verbosity_flag::{InfoLevel, LogLevel, Verbosity};
+use clap_verbosity_flag::{InfoLevel, Verbosity};
 use log::info;
 
 #[derive(Clone)]
@@ -25,15 +25,6 @@ enum Event {
     Detach(AttachedDevice),
     Initialized,
     Stopped(i64),
-}
-
-impl From<HotPlugEvent> for Event {
-    fn from(evt: HotPlugEvent) -> Self {
-        match evt {
-            HotPlugEvent::Attach(dev) => Self::Attach(dev),
-            HotPlugEvent::Detach(dev) => Self::Detach(dev),
-        }
-    }
 }
 
 impl Display for Event {
@@ -55,44 +46,6 @@ impl Display for Event {
     }
 }
 
-fn run_hotplug(
-    device: DeviceRef,
-    symlinks: Vec<Symlink>,
-    container: Arc<Container>,
-    verbosity: Verbosity<impl LogLevel>,
-) -> impl tokio_stream::Stream<Item = Result<Event>> {
-    async_stream::try_stream! {
-        let name = container.name().await?;
-        let id = container.id();
-        info!("Attaching to container {name} ({id})");
-
-        let hub_path = device.device()?.syspath().to_owned();
-        let mut hotplug = HotPlug::new(container.clone(), hub_path.clone(), symlinks)?;
-
-        {
-            let events = hotplug.start();
-            tokio::pin!(events);
-            while let Some(event) = events.next().await {
-                yield Event::from(event?);
-            }
-        }
-
-        yield Event::Initialized;
-
-        if !verbosity.is_silent() {
-            container.attach().await?.pipe_std();
-        }
-
-        {
-            let events = hotplug.run();
-            tokio::pin!(events);
-            while let Some(event) = events.next().await {
-                yield Event::from(event?);
-            }
-        }
-    }
-}
-
 async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
     let hub_path = param.root_device.device()?.syspath().to_owned();
 
@@ -102,12 +55,15 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
     let container = Arc::new(docker.run(param.docker_args).await?);
     drop(container.clone().pipe_signals());
 
-    let hotplug_stream = run_hotplug(
-        param.root_device,
-        param.symlink,
-        container.clone(),
-        verbosity,
+    info!(
+        "Attaching to container {} ({})",
+        container.name().await?,
+        container.id()
     );
+
+    let mut hotplug = HotPlug::new(container.clone(), hub_path.clone(), param.symlink)?;
+    let hotplug_stream = hotplug.run();
+
     let container_stream = {
         let container = container.clone();
         async_stream::try_stream! {
@@ -126,6 +82,11 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
             let event = event?;
             info!("{}", event);
             match event {
+                Event::Initialized => {
+                    if !verbosity.is_silent() {
+                        container.attach().await?.pipe_std();
+                    }
+                }
                 Event::Detach(dev) if dev.syspath() == hub_path => {
                     info!("Hub device detached. Stopping container.");
                     status = param.root_unplugged_exit_code;

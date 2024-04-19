@@ -11,6 +11,7 @@ use hotplug::{AttachedDevice, Event as HotPlugEvent, HotPlug};
 
 use std::fmt::Display;
 use std::pin::pin;
+use std::sync::Arc;
 use tokio_stream::StreamExt;
 
 use anyhow::Result;
@@ -57,7 +58,7 @@ impl Display for Event {
 fn run_hotplug(
     device: DeviceRef,
     symlinks: Vec<Symlink>,
-    container: Container,
+    container: Arc<Container>,
     verbosity: Verbosity<impl LogLevel>,
 ) -> impl tokio_stream::Stream<Item = Result<Event>> {
     async_stream::try_stream! {
@@ -93,13 +94,14 @@ fn run_hotplug(
 }
 
 async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
+    let hub_path = param.root_device.device()?.syspath().to_owned();
+
     let mut status = 0;
 
     let docker = Docker::connect_with_defaults()?;
-    let container = docker.run(param.docker_args).await?;
-    drop(container.pipe_signals());
+    let container = Arc::new(docker.run(param.docker_args).await?);
+    drop(container.clone().pipe_signals());
 
-    let hub_path = param.root_device.device()?.syspath().to_owned();
     let hotplug_stream = run_hotplug(
         param.root_device,
         param.symlink,

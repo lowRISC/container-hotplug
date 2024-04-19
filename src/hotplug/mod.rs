@@ -7,8 +7,8 @@ use crate::docker::Container;
 
 use anyhow::Result;
 use async_stream::try_stream;
-use std::collections::HashMap;
 use std::path::PathBuf;
+use std::{collections::HashMap, sync::Arc};
 use tokio_stream::StreamExt;
 
 pub use crate::dev::{Device, DeviceEvent};
@@ -21,7 +21,7 @@ pub enum Event {
 }
 
 pub struct HotPlug {
-    pub container: Container,
+    pub container: Arc<Container>,
     symlinks: Vec<cli::Symlink>,
     monitor: DeviceMonitor,
     devices: HashMap<PathBuf, AttachedDevice>,
@@ -29,7 +29,7 @@ pub struct HotPlug {
 
 impl HotPlug {
     pub fn new(
-        container: Container,
+        container: Arc<Container>,
         hub_path: PathBuf,
         symlinks: Vec<cli::Symlink>,
     ) -> Result<Self> {

@@ -18,7 +18,6 @@ use crate::cgroup::{
     DeviceAccessControllerV2, DeviceType,
 };
 
-#[derive(Clone)]
 pub struct Container {
     docker: bollard::Docker,
     id: String,
@@ -295,7 +294,7 @@ impl Container {
         .await?
     }
 
-    pub async fn pipe_signals(&self) -> JoinHandle<Result<()>> {
+    pub async fn pipe_signals(self: Arc<Self>) -> JoinHandle<Result<()>> {
         let container = self.clone();
         let signal_handler = async move {
             let mut stream = pin!(signal_stream(SignalKind::alarm())

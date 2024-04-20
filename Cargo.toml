@@ -14,7 +14,6 @@ clap = { version = "4", features = ["default", "derive"] }
 clap-verbosity-flag = "2"
 humantime = "2"
 bytes = "1"
-usb-ids = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["full"] }

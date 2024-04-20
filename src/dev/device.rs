@@ -30,28 +30,38 @@ impl Device {
         Self { device, devnode }
     }
 
-    fn display_name_from_db(&self) -> Option<String> {
-        let vid = self.device.property_value("ID_VENDOR_ID")?.to_str()?;
-        let pid = self.device.property_value("ID_MODEL_ID")?.to_str()?;
-        let vid = u16::from_str_radix(vid, 16).ok()?;
-        let pid = u16::from_str_radix(pid, 16).ok()?;
-        let device = usb_ids::Device::from_vid_pid(vid, pid)?;
-        let vendor = device.vendor().name();
-        let product = device.name();
-        Some(format!("{vendor} {product}"))
-    }
-
-    fn display_name_from_props(&self) -> Option<String> {
-        let vid = self.device.property_value("ID_VENDOR_ENC")?.to_str()?;
-        let pid = self.device.property_value("ID_MODEL_ENC")?.to_str()?;
-        let vid = unescape::unescape(vid)?;
-        let pid = unescape::unescape(pid)?;
-        Some(format!("{} {}", vid.trim(), pid.trim()))
-    }
-
     pub fn display_name(&self) -> Option<String> {
-        self.display_name_from_db()
-            .or_else(|| self.display_name_from_props())
+        let vendor = None
+            .or_else(|| {
+                Some(
+                    self.device
+                        .property_value("ID_VENDOR_FROM_DATABASE")?
+                        .to_str()?
+                        .to_owned(),
+                )
+            })
+            .or_else(|| {
+                let vendor = self.device.property_value("ID_VENDOR_ENC")?.to_str()?;
+                let vendor = unescape::unescape(vendor)?;
+                Some(vendor)
+            })?;
+
+        let model = None
+            .or_else(|| {
+                Some(
+                    self.device
+                        .property_value("ID_MODEL_FROM_DATABASE")?
+                        .to_str()?
+                        .to_owned(),
+                )
+            })
+            .or_else(|| {
+                let model = self.device.property_value("ID_MODEL_ENC")?.to_str()?;
+                let model = unescape::unescape(model)?;
+                Some(model)
+            })?;
+
+        Some(format!("{} {}", vendor.trim(), model.trim()))
     }
 
     pub fn udev(&self) -> &udev::Device {

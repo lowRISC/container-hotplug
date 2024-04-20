@@ -42,7 +42,7 @@ impl Device {
             })
             .or_else(|| {
                 let vendor = self.device.property_value("ID_VENDOR_ENC")?.to_str()?;
-                let vendor = unescape::unescape(vendor)?;
+                let vendor = crate::util::escape::unescape_devnode(vendor).ok()?;
                 Some(vendor)
             })?;
 
@@ -57,7 +57,7 @@ impl Device {
             })
             .or_else(|| {
                 let model = self.device.property_value("ID_MODEL_ENC")?.to_str()?;
-                let model = unescape::unescape(model)?;
+                let model = crate::util::escape::unescape_devnode(model).ok()?;
                 Some(model)
             })?;
 

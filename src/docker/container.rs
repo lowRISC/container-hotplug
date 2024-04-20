@@ -1,7 +1,7 @@
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::pin::pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Error, Result};
@@ -9,13 +9,13 @@ use bollard::service::EventMessage;
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt;
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::Mutex;
 use tokio::task::{spawn, JoinHandle};
 use tokio_stream::StreamExt;
 
 use super::{IoStream, IoStreamSource};
 use crate::cgroup::{
-    Access, DeviceAccessController, DeviceAccessControllerDummy, DeviceAccessControllerV1,
-    DeviceAccessControllerV2, DeviceType,
+    Access, DeviceAccessController, DeviceAccessControllerV1, DeviceAccessControllerV2, DeviceType,
 };
 
 pub struct Container {
@@ -23,7 +23,7 @@ pub struct Container {
     id: String,
     user: String,
     remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
-    cgroup_device_filter: Arc<Mutex<Option<ManuallyDrop<Box<dyn DeviceAccessController + Send>>>>>,
+    cgroup_device_filter: Mutex<Option<ManuallyDrop<Box<dyn DeviceAccessController + Send>>>>,
 }
 
 impl Container {
@@ -44,27 +44,25 @@ impl Container {
             .boxed()
             .shared();
 
-        let cgroup_device_filter: Box<dyn DeviceAccessController + Send> =
+        // Dropping the device filter will cause the container to have arbitrary device access.
+        // So keep it alive until we're sure that the container is stopped.
+        let cgroup_device_filter: Option<ManuallyDrop<Box<dyn DeviceAccessController + Send>>> =
             match DeviceAccessControllerV2::new(
                 format!("/sys/fs/cgroup/system.slice/docker-{id}.scope").as_ref(),
             ) {
-                Ok(v) => Box::new(v),
+                Ok(v) => Some(ManuallyDrop::new(Box::new(v))),
                 Err(err2) => match DeviceAccessControllerV1::new(
                     format!("/sys/fs/cgroup/devices/docker/{id}").as_ref(),
                 ) {
-                    Ok(v) => Box::new(v),
+                    Ok(v) => Some(ManuallyDrop::new(Box::new(v))),
                     Err(err1) => {
                         log::error!("neither cgroup v1 and cgroup v2 works");
                         log::error!("cgroup v2: {err2}");
                         log::error!("cgroup v1: {err1}");
-                        Box::new(DeviceAccessControllerDummy)
+                        None
                     }
                 },
             };
-
-        // Dropping the device filter will cause the container to have arbitrary device access.
-        // So keep it alive until we're sure that the container is stopped.
-        let cgroup_device_filter = ManuallyDrop::new(cgroup_device_filter);
 
         Ok(Self {
             docker: docker.clone(),
@@ -76,7 +74,7 @@ impl Container {
                 user
             },
             remove_event: remove_evevnt,
-            cgroup_device_filter: Arc::new(Mutex::new(Some(cgroup_device_filter))),
+            cgroup_device_filter: Mutex::new(cgroup_device_filter),
         })
     }
 
@@ -115,7 +113,11 @@ impl Container {
 
         // Stop the cgroup device filter. Only do so once we're sure that the container is removed.
         drop(ManuallyDrop::into_inner(
-            self.cgroup_device_filter.lock().unwrap().take().unwrap(),
+            self.cgroup_device_filter
+                .lock()
+                .await
+                .take()
+                .context("Device controller does not exist")?,
         ));
 
         Ok(())
@@ -279,19 +281,12 @@ impl Container {
     }
 
     pub async fn device(&self, (major, minor): (u32, u32), access: Access) -> Result<()> {
-        let controller = self.cgroup_device_filter.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut controller = controller.lock().unwrap();
-            controller.as_mut().unwrap().set_permission(
-                DeviceType::Character,
-                major,
-                minor,
-                access,
-            )?;
-
-            Ok(())
-        })
-        .await?
+        let mut controller = self.cgroup_device_filter.lock().await;
+        controller
+            .as_mut()
+            .context("Device controller does not exist")?
+            .set_permission(DeviceType::Character, major, minor, access)?;
+        Ok(())
     }
 
     pub async fn pipe_signals(self: Arc<Self>) -> JoinHandle<Result<()>> {

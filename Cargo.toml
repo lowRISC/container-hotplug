@@ -20,7 +20,7 @@ tokio-util = { version = "0.7", features = ["full"] }
 async-stream = "0.3"
 udev = "0.8"
 bollard = "0.16"
-rustix = { version = "0.38", features = ["fs", "stdio", "termios", "process"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios", "process", "thread"] }
 bitflags = "2"
 aya = { git = "https://github.com/aya-rs/aya.git" }
 

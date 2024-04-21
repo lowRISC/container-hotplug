@@ -3,7 +3,7 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use anyhow::{anyhow, ensure, Context, Error, Result};
-use rustix::fs::{Gid, Uid};
+use rustix::fs::{FileType, Gid, Mode, Uid};
 use rustix::process::{Pid, Signal};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
@@ -104,38 +104,6 @@ impl Container {
         Ok(result)
     }
 
-    pub async fn exec_as_root<T: ToString>(&self, cmd: &[T]) -> Result<IoStream> {
-        let cmd = cmd.iter().map(|s| s.to_string()).collect();
-        let options = bollard::exec::CreateExecOptions {
-            cmd: Some(cmd),
-            attach_stdin: Some(true),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            tty: Some(true),
-            detach_keys: Some("ctrl-c".to_string()),
-            user: Some("root".to_string()),
-            ..Default::default()
-        };
-        let response = self.docker.create_exec::<String>(&self.id, options).await?;
-        let id = response.id;
-
-        let options = bollard::exec::StartExecOptions {
-            detach: false,
-            ..Default::default()
-        };
-        let response = self.docker.start_exec(&id, Some(options)).await?;
-        let bollard::exec::StartExecResults::Attached { input, output } = response else {
-            unreachable!("we asked for attached IO streams");
-        };
-
-        Ok(IoStream {
-            output,
-            input,
-            source: IoStreamSource::Exec(id),
-            docker: self.docker.clone(),
-        })
-    }
-
     pub async fn attach(&self) -> Result<IoStream> {
         let options = bollard::container::AttachContainerOptions::<String> {
             stdin: Some(true),
@@ -196,67 +164,42 @@ impl Container {
         Ok(u8::try_from(code).unwrap_or(1))
     }
 
-    pub async fn chown_to_user(&self, path: &str) -> Result<()> {
-        // Use `-h` to not follow symlink
-        self.exec_as_root(&[
-            "chown",
-            "-h",
-            &format!("{}:{}", self.uid.as_raw(), self.gid.as_raw()),
-            path,
-        ])
-        .await?
-        .collect()
-        .await?;
-        Ok(())
-    }
-
-    // Note: we use `&str` here instead of `Path` because docker API expects string instead `OsStr`.
-    pub async fn mkdir(&self, path: &str) -> Result<()> {
-        self.exec_as_root(&["mkdir", "-p", path])
-            .await?
-            .collect()
-            .await?;
-        Ok(())
-    }
-
-    pub async fn mkdir_for(&self, path: &str) -> Result<()> {
-        if let Some(path) = std::path::Path::new(path).parent() {
-            self.mkdir(path.to_str().unwrap()).await?;
-        }
-        Ok(())
-    }
-
     pub async fn mknod(&self, node: &Path, (major, minor): (u32, u32)) -> Result<()> {
-        self.rm(node).await?;
-        let node = node.to_str().context("node is not UTF-8")?;
-        self.mkdir_for(node).await?;
-        self.exec_as_root(&["mknod", node, "c", &major.to_string(), &minor.to_string()])
-            .await?
-            .collect()
-            .await?;
-        self.chown_to_user(node).await?;
-        Ok(())
+        crate::util::namespace::MntNamespace::of_pid(self.pid)?.enter(|| {
+            if let Some(parent) = node.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::remove_file(node);
+            rustix::fs::mknodat(
+                rustix::fs::CWD,
+                node,
+                FileType::CharacterDevice,
+                Mode::from(0o644),
+                rustix::fs::makedev(major, minor),
+            )?;
+            if !self.uid.is_root() {
+                rustix::fs::chown(node, Some(self.uid), Some(self.gid))?;
+            }
+            Ok(())
+        })?
     }
 
     pub async fn symlink(&self, source: &Path, link: &Path) -> Result<()> {
-        let source = source.to_str().context("node is not UTF-8")?;
-        let link = link.to_str().context("symlink is not UTF-8")?;
-        self.mkdir_for(link).await?;
-        self.exec_as_root(&["ln", "-sf", source, link])
-            .await?
-            .collect()
-            .await?;
-        self.chown_to_user(link).await?;
-        Ok(())
+        crate::util::namespace::MntNamespace::of_pid(self.pid)?.enter(|| {
+            if let Some(parent) = link.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::remove_file(link);
+            std::os::unix::fs::symlink(source, link)?;
+            // No need to chown symlink. Permission is determined by the target.
+            Ok(())
+        })?
     }
 
     pub async fn rm(&self, node: &Path) -> Result<()> {
-        let node = node.to_str().context("node is not UTF-8")?;
-        self.exec_as_root(&["rm", "-f", node])
-            .await?
-            .collect()
-            .await?;
-        Ok(())
+        crate::util::namespace::MntNamespace::of_pid(self.pid)?.enter(|| {
+            let _ = std::fs::remove_file(node);
+        })
     }
 
     pub async fn device(&self, (major, minor): (u32, u32), access: Access) -> Result<()> {

@@ -10,6 +10,7 @@ use docker::Docker;
 use hotplug::{AttachedDevice, HotPlug};
 
 use std::fmt::Display;
+use std::mem::ManuallyDrop;
 use std::pin::pin;
 use std::sync::Arc;
 
@@ -54,6 +55,10 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
 
     let docker = Docker::connect_with_defaults()?;
     let container = Arc::new(docker.run(param.docker_args).await?);
+    // Dropping the `Container` will detach the device cgroup filter.
+    // To prevent accidentally detaching it, wrap it in `ManuallyDrop` and only do so
+    // when we're certain that the container stopped.
+    let container_keep = ManuallyDrop::new(container.clone());
     drop(container.clone().pipe_signals());
 
     info!(
@@ -111,7 +116,9 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
     }
     .await;
 
-    let _ = container.remove(param.remove_timeout).await;
+    if container.remove(param.remove_timeout).await.is_ok() {
+        drop(ManuallyDrop::into_inner(container_keep));
+    }
     result?;
     Ok(status)
 }

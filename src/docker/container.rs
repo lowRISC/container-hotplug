@@ -1,4 +1,3 @@
-use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::pin::pin;
 use std::sync::Arc;
@@ -24,7 +23,7 @@ pub struct Container {
     id: String,
     user: String,
     remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
-    cgroup_device_filter: Mutex<Option<ManuallyDrop<Box<dyn DeviceAccessController + Send>>>>,
+    cgroup_device_filter: Mutex<Option<Box<dyn DeviceAccessController + Send>>>,
 }
 
 impl Container {
@@ -47,15 +46,15 @@ impl Container {
 
         // Dropping the device filter will cause the container to have arbitrary device access.
         // So keep it alive until we're sure that the container is stopped.
-        let cgroup_device_filter: Option<ManuallyDrop<Box<dyn DeviceAccessController + Send>>> =
+        let cgroup_device_filter: Option<Box<dyn DeviceAccessController + Send>> =
             match DeviceAccessControllerV2::new(
                 format!("/sys/fs/cgroup/system.slice/docker-{id}.scope").as_ref(),
             ) {
-                Ok(v) => Some(ManuallyDrop::new(Box::new(v))),
+                Ok(v) => Some(Box::new(v)),
                 Err(err2) => match DeviceAccessControllerV1::new(
                     format!("/sys/fs/cgroup/devices/docker/{id}").as_ref(),
                 ) {
-                    Ok(v) => Some(ManuallyDrop::new(Box::new(v))),
+                    Ok(v) => Some(Box::new(v)),
                     Err(err1) => {
                         log::error!("neither cgroup v1 and cgroup v2 works");
                         log::error!("cgroup v2: {err2}");
@@ -111,15 +110,6 @@ impl Container {
                 .await
                 .context("no destroy event")?;
         }
-
-        // Stop the cgroup device filter. Only do so once we're sure that the container is removed.
-        drop(ManuallyDrop::into_inner(
-            self.cgroup_device_filter
-                .lock()
-                .await
-                .take()
-                .context("Device controller does not exist")?,
-        ));
 
         Ok(())
     }

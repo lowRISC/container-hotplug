@@ -11,7 +11,7 @@ use futures::FutureExt;
 use rustix::process::Signal;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
-use tokio::task::{spawn, JoinHandle};
+use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
 use super::{IoStream, IoStreamSource};
@@ -293,8 +293,8 @@ impl Container {
     }
 
     pub async fn pipe_signals(self: Arc<Self>) -> JoinHandle<Result<()>> {
-        let container = self.clone();
-        let signal_handler = async move {
+        let container = Arc::downgrade(&self);
+        tokio::spawn(async move {
             let mut stream = pin!(signal_stream(SignalKind::alarm())
                 .merge(signal_stream(SignalKind::hangup()))
                 .merge(signal_stream(SignalKind::interrupt()))
@@ -305,22 +305,13 @@ impl Container {
 
             while let Some(signal) = stream.next().await {
                 container
+                    .upgrade()
+                    .context("Container dropped")?
                     .kill(Signal::from_raw(signal?.as_raw_value()).unwrap())
                     .await?;
             }
 
             Err::<_, Error>(anyhow!("Failed to listen for signals"))
-        };
-
-        let container = self.clone();
-        let wait_for_exit = async move { container.wait().await };
-
-        spawn(async move {
-            tokio::select! {
-                result = signal_handler => result,
-                result = wait_for_exit => result,
-            }?;
-            Ok(())
         })
     }
 }

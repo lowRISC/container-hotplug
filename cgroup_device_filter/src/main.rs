@@ -1,12 +1,12 @@
 #![no_std]
 #![no_main]
 
-use aya_bpf::bindings::{
+use aya_ebpf::bindings::{
     BPF_DEVCG_ACC_MKNOD, BPF_DEVCG_DEV_BLOCK, BPF_DEVCG_DEV_CHAR, BPF_F_NO_PREALLOC,
 };
-use aya_bpf::macros::{cgroup_device, map};
-use aya_bpf::maps::HashMap;
-use aya_bpf::programs::DeviceContext;
+use aya_ebpf::macros::{cgroup_device, map};
+use aya_ebpf::maps::HashMap;
+use aya_ebpf::programs::DeviceContext;
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -105,7 +105,18 @@ fn check_device(ctx: DeviceContext) -> i32 {
 
     // For extra devices, check the map.
     // SAFETY: we have BPF_F_NO_PREALLOC enabled so the map is safe to access concurrently.
-    let device_perm = unsafe { DEVICE_PERM.get(&dev).copied() };
+    let mut device_perm = unsafe { DEVICE_PERM.get(&dev).copied() };
+    if device_perm.is_none() {
+        // If the device is not explicitly specified, use a special device (0, 0) to find the
+        // default permission to usee.
+        device_perm = unsafe {
+            DEVICE_PERM.get(&Device {
+                ty: dev.ty,
+                major: 0,
+                minor: 0,
+            }).copied()
+        };
+    }
     match device_perm {
         Some(perm) => (perm & access == access) as i32,
         None => 0,

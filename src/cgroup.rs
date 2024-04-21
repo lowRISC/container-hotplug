@@ -15,6 +15,7 @@ pub enum DeviceType {
 }
 
 bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy)]
     pub struct Access: u32 {
         const MKNOD = 1;
         const READ = 2;
@@ -133,7 +134,7 @@ impl DeviceAccessControllerV2 {
         // filter program and detach the one by docker.
         let cgroup_fd = File::open(cgroup)?;
 
-        let mut bpf = aya::Bpf::load(include_bytes!(concat!(
+        let mut bpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/cgroup_device_filter/target/bpfel-unknown-none/release/cgroup_device_filter"
         )))?;
@@ -149,7 +150,11 @@ impl DeviceAccessControllerV2 {
         // Wrap this inside `ManuallyDrop` to prevent accidental detaching.
         let existing_programs = ManuallyDrop::new(CgroupDevice::query(&cgroup_fd)?);
 
-        program.attach(&cgroup_fd)?;
+        let link_id = program.attach(&cgroup_fd)?;
+
+        // Forget the link so it won't be detached on drop.
+        let link = program.take_link(link_id);
+        std::mem::forget(link);
 
         // Pin the program so that if container-hotplug accidentally exits, the filter won't be removed from the docker
         // container.

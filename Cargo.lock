@@ -153,7 +153,7 @@ checksum = "d468802bab17cbc0cc575e9b053f41e72aa36bfa6b7f55e3529ffa43161b97fa"
 [[package]]
 name = "aya"
 version = "0.12.0"
-source = "git+https://github.com/aya-rs/aya.git#542306d295e51ac1ec117ce453544f201875af3d"
+source = "git+https://github.com/aya-rs/aya.git#ac58601fb9073f4b5bfff5d1acf4df702f1889cb"
 dependencies = [
  "assert_matches",
  "aya-obj",
@@ -162,20 +162,20 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
- "object",
+ "object 0.34.0",
  "thiserror",
 ]
 
 [[package]]
 name = "aya-obj"
 version = "0.1.0"
-source = "git+https://github.com/aya-rs/aya.git#542306d295e51ac1ec117ce453544f201875af3d"
+source = "git+https://github.com/aya-rs/aya.git#ac58601fb9073f4b5bfff5d1acf4df702f1889cb"
 dependencies = [
  "bytes",
  "core-error",
  "hashbrown 0.14.3",
  "log",
- "object",
+ "object 0.34.0",
  "thiserror",
 ]
 
@@ -190,7 +190,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "miniz_oxide",
- "object",
+ "object 0.32.2",
  "rustc-demangle",
 ]
 
@@ -878,6 +878,15 @@ name = "object"
 version = "0.32.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6a622008b6e321afc04970976f62ee297fdbaa6f95318ca343e3eebb9648441"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "object"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7090bae93f8585aad99e595b7073c5de9ba89fbd6b4e9f0cdd7a10177273ac8"
 dependencies = [
  "memchr",
 ]

@@ -201,7 +201,7 @@ impl Container {
         Ok(())
     }
 
-    pub async fn wait(&self) -> Result<i64> {
+    pub async fn wait(&self) -> Result<u8> {
         let options = bollard::container::WaitContainerOptions {
             condition: "not-running",
         };
@@ -213,13 +213,15 @@ impl Container {
             .await
             .context("No response received for wait")?;
 
-        match response {
-            Ok(response) => Ok(response.status_code),
+        let code = match response {
+            Ok(response) => response.status_code,
             // If the container does not complete, e.g. it's killed, then we will receive
             // an error code through docker.
-            Err(bollard::errors::Error::DockerContainerWaitError { error: _, code }) => Ok(code),
+            Err(bollard::errors::Error::DockerContainerWaitError { error: _, code }) => code,
             Err(err) => Err(err)?,
-        }
+        };
+
+        Ok(u8::try_from(code).unwrap_or(1))
     }
 
     pub async fn chown_to_user(&self, path: &str) -> Result<()> {

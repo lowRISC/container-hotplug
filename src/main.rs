@@ -24,7 +24,7 @@ enum Event {
     Attach(AttachedDevice),
     Detach(AttachedDevice),
     Initialized,
-    Stopped(i64),
+    Stopped(u8),
 }
 
 impl Display for Event {
@@ -94,13 +94,10 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
                     break;
                 }
                 Event::Stopped(code) => {
-                    status = 1;
-                    if let Ok(code) = u8::try_from(code) {
-                        // Use the container exit code, but only if it won't be confused
-                        // with the pre-defined root_unplugged_exit_code.
-                        if code != param.root_unplugged_exit_code {
-                            status = code;
-                        }
+                    // Use the container exit code, but only if it won't be confused
+                    // with the pre-defined root_unplugged_exit_code.
+                    if code != param.root_unplugged_exit_code {
+                        status = code;
                     } else {
                         status = 1;
                     }

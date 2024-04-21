@@ -22,7 +22,7 @@ async-stream = "0.3"
 udev = "0.8"
 bollard = "0.16"
 futures = "0.3"
-rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios", "process"] }
 bitflags = "2"
 aya = { git = "https://github.com/aya-rs/aya.git" }
 

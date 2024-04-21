@@ -12,12 +12,13 @@ use hotplug::{AttachedDevice, HotPlug};
 use std::fmt::Display;
 use std::pin::pin;
 use std::sync::Arc;
-use tokio_stream::StreamExt;
 
 use anyhow::Result;
 use clap::Parser;
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use log::info;
+use rustix::process::Signal;
+use tokio_stream::StreamExt;
 
 #[derive(Clone)]
 enum Event {
@@ -90,7 +91,7 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
                 Event::Detach(dev) if dev.syspath() == hub_path => {
                     info!("Hub device detached. Stopping container.");
                     status = param.root_unplugged_exit_code;
-                    container.kill(15).await?;
+                    container.kill(Signal::Term).await?;
                     break;
                 }
                 Event::Stopped(code) => {

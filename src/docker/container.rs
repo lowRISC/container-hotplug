@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context, Error, Result};
 use bollard::service::EventMessage;
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt;
+use rustix::process::Signal;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
 use tokio::task::{spawn, JoinHandle};
@@ -193,9 +194,9 @@ impl Container {
         Ok(name)
     }
 
-    pub async fn kill(&self, signal: i32) -> Result<()> {
+    pub async fn kill(&self, signal: Signal) -> Result<()> {
         let options = bollard::container::KillContainerOptions {
-            signal: format!("{}", signal),
+            signal: format!("{}", signal as i32),
         };
         self.docker.kill_container(&self.id, Some(options)).await?;
         Ok(())
@@ -303,7 +304,9 @@ impl Container {
                 .merge(signal_stream(SignalKind::user_defined2())));
 
             while let Some(signal) = stream.next().await {
-                container.kill(signal?.as_raw_value()).await?;
+                container
+                    .kill(Signal::from_raw(signal?.as_raw_value()).unwrap())
+                    .await?;
             }
 
             Err::<_, Error>(anyhow!("Failed to listen for signals"))

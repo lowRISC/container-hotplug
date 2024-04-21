@@ -14,7 +14,7 @@ use std::mem::ManuallyDrop;
 use std::pin::pin;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use log::info;
@@ -51,8 +51,6 @@ impl Display for Event {
 async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
     let hub_path = param.root_device.device()?.syspath().to_owned();
 
-    let mut status = 0;
-
     let docker = Docker::connect_with_defaults()?;
     let container = Arc::new(docker.run(param.docker_args).await?);
     // Dropping the `Container` will detach the device cgroup filter.
@@ -78,48 +76,41 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
         }
     };
 
-    let stream = pin!(tokio_stream::empty()
+    let mut stream = pin!(tokio_stream::empty()
         .merge(hotplug_stream)
         .merge(container_stream));
 
-    let result: Result<()> = async {
-        tokio::pin!(stream);
-        while let Some(event) = stream.next().await {
-            let event = event?;
-            info!("{}", event);
-            match event {
-                Event::Initialized => {
-                    if !verbosity.is_silent() {
-                        container.attach().await?.pipe_std();
-                    }
+    let status = loop {
+        let event = stream.try_next().await?.context("No more events")?;
+        info!("{}", event);
+        match event {
+            Event::Initialized => {
+                if !verbosity.is_silent() {
+                    container.attach().await?.pipe_std();
                 }
-                Event::Detach(dev) if dev.syspath() == hub_path => {
-                    info!("Hub device detached. Stopping container.");
-                    status = param.root_unplugged_exit_code;
-                    container.kill(Signal::Term).await?;
-                    break;
-                }
-                Event::Stopped(code) => {
-                    // Use the container exit code, but only if it won't be confused
-                    // with the pre-defined root_unplugged_exit_code.
-                    if code != param.root_unplugged_exit_code {
-                        status = code;
-                    } else {
-                        status = 1;
-                    }
-                    break;
-                }
-                _ => {}
             }
-        }
-        Ok(())
-    }
-    .await;
+            Event::Detach(dev) if dev.syspath() == hub_path => {
+                info!("Hub device detached. Stopping container.");
+                container.kill(Signal::Kill).await?;
 
-    if container.remove(param.remove_timeout).await.is_ok() {
-        drop(ManuallyDrop::into_inner(container_keep));
-    }
-    result?;
+                let _ = container.wait().await?;
+                break param.root_unplugged_exit_code;
+            }
+            Event::Stopped(code) => {
+                // Use the container exit code, but only if it won't be confused
+                // with the pre-defined root_unplugged_exit_code.
+                if code != param.root_unplugged_exit_code {
+                    break code;
+                } else {
+                    break 1;
+                }
+            }
+            _ => {}
+        }
+    };
+
+    drop(ManuallyDrop::into_inner(container_keep));
+
     Ok(status)
 }
 

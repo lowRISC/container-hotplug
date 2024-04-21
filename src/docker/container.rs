@@ -1,12 +1,8 @@
 use std::path::Path;
 use std::pin::pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{anyhow, Context, Error, Result};
-use bollard::service::EventMessage;
-use futures::future::{BoxFuture, Shared};
-use futures::FutureExt;
 use rustix::process::Signal;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
@@ -22,28 +18,11 @@ pub struct Container {
     docker: bollard::Docker,
     id: String,
     user: String,
-    remove_event: Shared<BoxFuture<'static, Option<EventMessage>>>,
     cgroup_device_filter: Mutex<Option<Box<dyn DeviceAccessController + Send>>>,
 }
 
 impl Container {
     pub(super) fn new(docker: &bollard::Docker, id: String, user: String) -> Result<Self> {
-        let mut remove_events = docker.events(Some(bollard::system::EventsOptions {
-            filters: [
-                ("container".to_owned(), vec![id.to_owned()]),
-                ("type".to_owned(), vec!["container".to_owned()]),
-                ("event".to_owned(), vec!["destroy".to_owned()]),
-            ]
-            .into(),
-            ..Default::default()
-        }));
-
-        // Spawn the future to start listening event.
-        let remove_evevnt = tokio::spawn(async move { remove_events.next().await?.ok() })
-            .map(|x| x.ok().flatten())
-            .boxed()
-            .shared();
-
         // Dropping the device filter will cause the container to have arbitrary device access.
         // So keep it alive until we're sure that the container is stopped.
         let cgroup_device_filter: Option<Box<dyn DeviceAccessController + Send>> =
@@ -73,51 +52,12 @@ impl Container {
             } else {
                 user
             },
-            remove_event: remove_evevnt,
             cgroup_device_filter: Mutex::new(cgroup_device_filter),
         })
     }
 
     pub fn id(&self) -> &str {
         &self.id
-    }
-
-    pub async fn remove(&self, timeout: Option<Duration>) -> Result<()> {
-        log::info!("Removing container {}", self.id);
-
-        // Since we passed "--rm" flag, docker will automatically start removing the container.
-        // Ignore any error for manual removal.
-        let _: Result<()> = async {
-            self.rename(&format!("removing-{}", self.id)).await?;
-            let options = bollard::container::RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            };
-            self.docker
-                .remove_container(&self.id, Some(options))
-                .await?;
-            Ok(())
-        }
-        .await;
-
-        if let Some(duration) = timeout {
-            tokio::time::timeout(duration, self.remove_event.clone())
-                .await?
-                .context("no destroy event")?;
-        } else {
-            self.remove_event
-                .clone()
-                .await
-                .context("no destroy event")?;
-        }
-
-        Ok(())
-    }
-
-    pub async fn rename(&self, name: &str) -> Result<()> {
-        let required = bollard::container::RenameContainerOptions { name };
-        self.docker.rename_container(&self.id, required).await?;
-        Ok(())
     }
 
     pub async fn exec_as_root<T: ToString>(&self, cmd: &[T]) -> Result<IoStream> {

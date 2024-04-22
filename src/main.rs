@@ -12,9 +12,10 @@ use hotplug::{AttachedDevice, HotPlug};
 use std::fmt::Display;
 use std::mem::ManuallyDrop;
 use std::pin::pin;
+use std::process::ExitCode;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use log::info;
@@ -114,8 +115,7 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
     Ok(status)
 }
 
-#[tokio::main]
-async fn main() {
+fn do_main() -> Result<u8> {
     let args = cli::Args::parse();
 
     let log_env = env_logger::Env::default()
@@ -134,17 +134,27 @@ async fn main() {
         .format_level(args.log_format.level)
         .init();
 
-    let result = match args.action {
-        Action::Run(param) => run(param, args.verbosity).await,
+    // Check that we're not running rootless. We need to control device access and must be root.
+    if !rustix::process::geteuid().is_root() {
+        bail!("This program must be run as root");
+    }
+
+    let param = match args.action {
+        Action::Run(param) => param,
     };
-    let code = match result {
-        Ok(code) => code,
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let result = rt.block_on(run(param, args.verbosity));
+    rt.shutdown_background();
+    result
+}
+
+fn main() -> ExitCode {
+    match do_main() {
+        Ok(code) => code.into(),
         Err(err) => {
-            log::error!("{err:?}");
-            125
+            log::error!("{:?}", err);
+            ExitCode::from(125)
         }
-    };
-    // Upon returning from `main`, tokio will attempt to shutdown, but if there're any blocking
-    // operation (e.g. fs operations), then the shutdown will hang.
-    std::process::exit(code.into());
+    }
 }

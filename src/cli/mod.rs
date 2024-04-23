@@ -1,34 +1,13 @@
 pub mod device;
-pub mod logfmt;
 pub mod symlink;
 
 use clap::{Parser, Subcommand};
-use clap_verbosity_flag::{InfoLevel, Verbosity};
 
 pub use device::DeviceRef;
-pub use logfmt::LogFormat;
 pub use symlink::Symlink;
 
 #[derive(Parser)]
 pub struct Args {
-    #[command(flatten)]
-    pub verbosity: Verbosity<InfoLevel>,
-
-    #[arg(
-        short = 'L',
-        long,
-        default_value = "+l-pmt",
-        id = "FORMAT",
-        global = true
-    )]
-    /// Log mesage format: [[+-][ltmp]*]* {n}
-    ///   +/-: enable/disable {n}
-    ///   l: level {n}
-    ///   t: timestamp {n}
-    ///   m/p: module name/path {n}
-    ///
-    pub log_format: LogFormat,
-
     #[command(subcommand)]
     pub action: Action,
 }

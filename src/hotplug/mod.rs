@@ -13,7 +13,7 @@ use super::Event;
 use crate::cgroup::Access;
 use crate::cli;
 use crate::dev::{DeviceEvent, DeviceMonitor};
-use crate::docker::Container;
+use crate::runc::Container;
 
 pub struct HotPlug {
     pub container: Arc<Container>,

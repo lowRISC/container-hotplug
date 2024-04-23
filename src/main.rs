@@ -1,17 +1,17 @@
 mod cgroup;
 mod cli;
 mod dev;
-mod docker;
 mod hotplug;
 mod runc;
 mod util;
 
-use cli::Action;
-use docker::Docker;
+use cli::{DeviceRef, Symlink};
 use hotplug::{AttachedDevice, HotPlug};
 
 use std::fmt::Display;
+use std::fs::File;
 use std::mem::ManuallyDrop;
+use std::os::unix::process::CommandExt;
 use std::pin::pin;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -19,7 +19,12 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use log::info;
-use rustix::process::Signal;
+use runc::cli::{CreateOptions, GlobalOptions};
+use runc::Container;
+use rustix::fd::OwnedFd;
+use rustix::pipe::PipeFlags;
+use rustix::process::{Signal, WaitOptions};
+use rustix::runtime::Fork;
 use tokio_stream::StreamExt;
 
 #[derive(Clone)]
@@ -27,7 +32,7 @@ enum Event {
     Attach(AttachedDevice),
     Detach(AttachedDevice),
     Initialized,
-    Stopped(u8),
+    Stopped,
 }
 
 impl Display for Event {
@@ -42,38 +47,75 @@ impl Display for Event {
             Event::Initialized => {
                 write!(f, "Container initialized")
             }
-            Event::Stopped(status) => {
-                write!(f, "Container exited with status {status}")
+            Event::Stopped => {
+                write!(f, "Container stopped")
             }
         }
     }
 }
 
-async fn run(param: cli::Run) -> Result<u8> {
-    let hub_path = param.root_device.device()?.syspath().to_owned();
+async fn create(global: GlobalOptions, create: CreateOptions, notifier: OwnedFd) -> Result<()> {
+    let mut notifier = Some(notifier);
 
-    let docker = Docker::connect_with_defaults()?;
-    let container = Arc::new(docker.run(param.docker_args).await?);
-    // Dropping the `Container` will detach the device cgroup filter.
-    // To prevent accidentally detaching it, wrap it in `ManuallyDrop` and only do so
-    // when we're certain that the container stopped.
+    let config = runc::config::Config::from_bundle(&create.bundle)?;
+    let device: DeviceRef = config
+        .annotations
+        .get("org.lowrisc.hotplug.device")
+        .context(
+            "Cannot find annotation `org.lowrisc.hotplug.device`. Please use normal runc instead.",
+        )?
+        .parse()?;
+
+    let mut symlinks = Vec::<Symlink>::new();
+    if let Some(symlink_annotation) = config.annotations.get("org.lowrisc.hotplug.symlinks") {
+        for symlink in symlink_annotation.split(',') {
+            symlinks.push(symlink.parse()?);
+        }
+    }
+
+    // Run this before calling into runc to create the container.
+    let hub_path = device.device()?.syspath().to_owned();
+
+    // Switch the logger to syslog. The runc logs are barely forwarded to the user or syslog by
+    // container managers and orchestrators, while we do want to preserve the hotplug events.
+    util::log::global_replace(Box::new(util::log::SyslogLogger::new()?));
+
+    // Delegate to runc to create container.
+    let runc = std::process::Command::new("runc")
+        .args(std::env::args().skip(1))
+        .spawn()
+        .context("Cannot start runc")?
+        .wait()
+        .context("Failed waiting for runc")?;
+    if !runc.success() {
+        std::process::exit(runc.code().unwrap_or(1));
+    }
+
+    let state: runc::state::State =
+        runc::state::State::from_root_and_id(&global.root, &create.container_id)?;
+
+    // Create a container handler.
+    // To avoid race where the container is deleted before the daemon is started, do this
+    // before forking.
+    let container = Arc::new(Container::new(&config, &state)?);
+    // Prevent the container's destructor from being executed in abnormal exit.
     let container_keep = ManuallyDrop::new(container.clone());
-    drop(container.clone().pipe_signals());
 
-    info!(
-        "Attaching to container {} ({})",
-        container.name().await?,
-        container.id()
-    );
+    // Before the parent process returns, we need to ensure that all stdio are redirected, otherwise it can cause
+    // issue to the spawning process since it will be unable to read EOF. Redirect all of them to /dev/null.
+    let null = File::options().append(true).open("/dev/null")?;
+    rustix::stdio::dup2_stdin(&null)?;
+    rustix::stdio::dup2_stdout(&null)?;
+    rustix::stdio::dup2_stderr(null)?;
 
-    let mut hotplug = HotPlug::new(container.clone(), hub_path.clone(), param.symlink)?;
+    let mut hotplug = HotPlug::new(Arc::clone(&container), hub_path.clone(), symlinks)?;
     let hotplug_stream = hotplug.run();
 
     let container_stream = {
         let container = container.clone();
         async_stream::try_stream! {
-            let status = container.wait().await?;
-            yield Event::Stopped(status)
+            container.wait().await?;
+            yield Event::Stopped;
         }
     };
 
@@ -81,36 +123,31 @@ async fn run(param: cli::Run) -> Result<u8> {
         .merge(hotplug_stream)
         .merge(container_stream));
 
-    let status = loop {
+    loop {
         let event = stream.try_next().await?.context("No more events")?;
         info!("{}", event);
         match event {
             Event::Initialized => {
-                container.attach().await?.pipe_std();
+                // Notify the parent process that we are ready to proceed.
+                let notifier = notifier.take().context("Initialized event seen twice")?;
+                rustix::io::write(notifier, &[0])?;
             }
             Event::Detach(dev) if dev.syspath() == hub_path => {
                 info!("Hub device detached. Stopping container.");
-                container.kill(Signal::Kill).await?;
-
-                let _ = container.wait().await?;
-                break param.root_unplugged_exit_code;
+                let _ = container.kill(Signal::Kill).await;
+                container.wait().await?;
+                break;
             }
-            Event::Stopped(code) => {
-                // Use the container exit code, but only if it won't be confused
-                // with the pre-defined root_unplugged_exit_code.
-                if code != param.root_unplugged_exit_code {
-                    break code;
-                } else {
-                    break 1;
-                }
+            Event::Stopped => {
+                break;
             }
             _ => {}
         }
-    };
+    }
 
     drop(ManuallyDrop::into_inner(container_keep));
 
-    Ok(status)
+    Ok(())
 }
 
 fn initialize_logger() {
@@ -126,8 +163,25 @@ fn initialize_logger() {
     util::log::global_replace(Box::new(logger));
 }
 
-fn do_main() -> Result<u8> {
-    let args = cli::Args::parse();
+fn do_main() -> Result<()> {
+    // This program is a wrapper around runc.
+    //
+    // When a container is started, runc is executed multiple times with different verbs:
+    // * "create": create cgroup for the container
+    // * "start": start the entrypoint
+    // * "kill": kill the container (skipped if the container init exits cleanly)
+    // * "delete": delete the cgroup
+    //
+    // We want to ensure that hotplug controller runs after the cgroup is created and last
+    // until the cgroup is deleted. So we start a daemon process when we received the
+    // "create" verb.
+    //
+    // To avoid having to communicate with the daemon process, the process
+    // itself monitors the state of the container and exits when the cgroup is removed.
+    // Therefore, we only need to intercept "create" command, and the rest can be forwarded
+    // to runc directly.
+
+    let args = runc::cli::Command::parse();
 
     initialize_logger();
 
@@ -136,22 +190,68 @@ fn do_main() -> Result<u8> {
         bail!("This program must be run as root");
     }
 
-    let param = match args.action {
-        Action::Run(param) => param,
+    // Switch log target if specified.
+    if let Some(log) = &args.global.log {
+        let log_target = File::options()
+            .create(true)
+            .append(true)
+            .open(log)
+            .context("Cannot open log file")?;
+        if args.global.log_format == runc::cli::LogFormat::Json {
+            util::log::global_replace(Box::new(runc::log::JsonLogger::new(Box::new(log_target))));
+        } else {
+            rustix::stdio::dup2_stderr(log_target)?;
+        }
+    }
+
+    let create_options = match args.command {
+        runc::cli::Subcommand::Create(create_options) => create_options,
+        runc::cli::Subcommand::Run { .. } => {
+            // `run` is a shorthand for `create` and `start`.
+            // It is never used by containerd shims, so there is no need to support it.
+            bail!("container-hotplug does not support `run` command.");
+        }
+        runc::cli::Subcommand::Other(_) => Err(std::process::Command::new("runc")
+            .args(std::env::args().skip(1))
+            .exec())?,
     };
 
-    let rt = tokio::runtime::Runtime::new()?;
-    let result = rt.block_on(run(param));
-    rt.shutdown_background();
-    result
+    // We need a daemon process to handle hotplug events.
+    // To avoid having to serialize and deserialize all information, `fork`-ing is easiest.
+    // However there is a limitation that `fork` is only safe in a single-threaded program.
+    // `tokio` runtime is multithreaded, so we need to `fork` before that.
+    // However for early forking, we need to know whether a container is successfully created.
+    // We do this by creating a pipe. The pipe can be closed by either the child process exiting,
+    // or the child process closing it.
+    let (parent, child) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC)?;
+    // SAFETY: forking is safe because we are single-threaded now.
+    match unsafe { rustix::runtime::fork()? } {
+        Fork::Child(_) => {
+            drop(parent);
+            tokio::runtime::Runtime::new()?.block_on(create(args.global, create_options, child))?;
+        }
+        Fork::Parent(pid) => {
+            drop(child);
+            if rustix::io::read(parent, &mut [0])? == 0 {
+                // In this case, the child process exited before notifying us.
+                std::process::exit(
+                    rustix::process::waitpid(Some(pid), WaitOptions::empty())?
+                        .unwrap()
+                        .exit_status()
+                        .unwrap_or(1) as _,
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn main() -> ExitCode {
-    match do_main() {
-        Ok(code) => code.into(),
-        Err(err) => {
-            log::error!("{:?}", err);
-            ExitCode::from(125)
-        }
+    if let Err(err) = do_main() {
+        log::error!("{:?}", err);
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }

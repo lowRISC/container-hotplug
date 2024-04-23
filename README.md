@@ -1,6 +1,6 @@
 # container-hotplug
 
-Hot-plug (and unplug) devices into a Docker container as they are (un)plugged.
+Hot-plug (and unplug) devices into a container as they are (un)plugged.
 
 ## Description
 
@@ -18,32 +18,82 @@ It then interfaces directly with the container's cgroup to grant it access to th
 To limit the devices the container can access, a _root device_ is specified.
 The container will receive access to any device descending from the root device.
 This is particularly useful if the root device is set to a USB hub.
-However, since hubs are rarely interesting, it can be specified as "the parent of device X",
+The hub can be specified directly, or it can be specified as "the parent of device X",
 e.g., we can giving a container access to all devices connected to the same hub as an Arduino board.
 
 Another concern is providing a container with well known paths for the devices.
 On bare-metal systems this would usually be achieved with a `SYMLINK` directive in a udev rule.
 This program tries to provide a similar functionality for containers, allowing you to specify symlinks for certain devices.
 
-This tool supports both cgroup v1 and v2.
+## Usage
 
-## Example
+This tool wraps `runc` command, with the additional hotplug feature. Therefore, it can be used as a drop in replace for
+many container managers/orchestrators that makes use of runc as runtime. You need to ensure `runc` is available in your `PATH`
+so `container-hotplug` can find it.
 
-Give a container access to all devices connected to the same hub as a CW310 board.
+It supports two annotations, `org.lowrisc.hotplug.device` and `org.lowrisc.hotplug.symlinks`.
 
-1. Find the USB VID and PID of the device using `lsusb`, for a CW310 that is `2b3e:c310`
-2. Run (as root) the container using `container-hotplug`:
+For Docker, you can specify an alternative runtime by [changing /etc/docker/daemon.json](https://docs.docker.com/engine/alternative-runtimes/#youki):
+```json
+{
+  "runtimes": {
+    "hotplug": {
+      "path": "/path/to/container-hotplug/binary"
+    }
+  }
+}
 ```
-container-hotplug run \
-    -d parent-of:usb:2b3e:c310 \
-    -- -it ubuntu:22.04 bash
+and use it by `--runtime hotplug` and appropriate annotation, e.g.
+```bash
+sudo docker run --runtime hotplug -it --annotation org.lowrisc.hotplug.device=parent-of:usb:2b2e:c310 ubuntu:latest
 ```
 
-If you want symlinks to the `tty` devices created by interfaces 1 and 3 of the CW310, run:
+For podman, you can specify the path directly, by:
+```bash
+sudo podman run --runtime /path/to/container-hotplug/binary -it --annotation org.lowrisc.hotplug.device=parent-of:usb:2b2e:c310 ubuntu:latest
 ```
-container-hotplug run \
-    -d parent-of:usb:2b3e:c310 \
-    -l usb:2b3e:c310:1=/dev/ttyACM_CW310_0 \
-    -l usb:2b3e:c310:3=/dev/ttyACM_CW310_1 \
-    -- -it ubuntu:22.04 bash
+
+For containerd (e.g. when using kubernetes), you can `/etc/containerd/config.toml` to add:
+```toml
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.hotplug]
+  runtime_type = "io.containerd.runc.v2"
+  pod_annotations = ["org.lowrisc.hotplug.*"]
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.hotplug.options]
+  SystemdCgroup = true
+  BinaryName = "/path/to/container-hotplug/binary"
 ```
+this would allow you to use `hotplug` as handler in k8s, e.g. add a runtime class with
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: hotplug
+handler: hotplug
+```
+and use it in pod with
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ubuntu
+  annotations:
+    org.lowrisc.hotplug.device: parent-of:usb:0bda:5634
+spec:
+  runtimeClassName: hotplug
+  containers:
+  - name: ubuntu
+    image: ubuntu:latest
+    stdin: true
+    tty: true
+```
+
+If you want symlinks to the `tty` devices created by interfaces 1 and 3 of the CW310, add
+```
+--annotation org.lowrisc.hotplug.symlinks=usb:2b3e:c310:1=/dev/ttyACM_CW310_0,usb:2b3e:c310:3=/dev/ttyACM_CW310_1
+```
+to docker/podman command line or
+```
+org.lowrisc.hotplug.symlinks: usb:2b3e:c310:1=/dev/ttyACM_CW310_0,usb:2b3e:c310:3=/dev/ttyACM_CW310_1
+```
+to k8s config.

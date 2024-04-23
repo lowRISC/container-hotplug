@@ -21,6 +21,7 @@ udev = "0.8"
 bollard = "0.16"
 rustix = { version = "0.38", features = ["fs", "stdio", "termios", "process", "thread"] }
 bitflags = "2"
+once_cell = "1"
 aya = { git = "https://github.com/aya-rs/aya.git" }
 
 [build-dependencies]

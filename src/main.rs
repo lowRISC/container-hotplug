@@ -116,11 +116,13 @@ fn initialize_logger() {
     let log_env = env_logger::Env::default()
         .filter_or("LOG", "off")
         .write_style_or("LOG_STYLE", "auto");
-    env_logger::Builder::new()
+    let logger = env_logger::Builder::new()
         .filter_module("container_hotplug", log::LevelFilter::Info)
         .format_target(false)
         .parse_env(log_env)
-        .init();
+        .build();
+    log::set_max_level(logger.filter());
+    util::log::global_replace(Box::new(logger));
 }
 
 fn do_main() -> Result<u8> {

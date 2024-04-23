@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use clap_verbosity_flag::{InfoLevel, Verbosity};
 use log::info;
 use rustix::process::Signal;
 use tokio_stream::StreamExt;
@@ -49,7 +48,7 @@ impl Display for Event {
     }
 }
 
-async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
+async fn run(param: cli::Run) -> Result<u8> {
     let hub_path = param.root_device.device()?.syspath().to_owned();
 
     let docker = Docker::connect_with_defaults()?;
@@ -86,9 +85,7 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
         info!("{}", event);
         match event {
             Event::Initialized => {
-                if !verbosity.is_silent() {
-                    container.attach().await?.pipe_std();
-                }
+                container.attach().await?.pipe_std();
             }
             Event::Detach(dev) if dev.syspath() == hub_path => {
                 info!("Hub device detached. Stopping container.");
@@ -115,24 +112,21 @@ async fn run(param: cli::Run, verbosity: Verbosity<InfoLevel>) -> Result<u8> {
     Ok(status)
 }
 
-fn do_main() -> Result<u8> {
-    let args = cli::Args::parse();
-
+fn initialize_logger() {
     let log_env = env_logger::Env::default()
         .filter_or("LOG", "off")
         .write_style_or("LOG_STYLE", "auto");
-
-    env_logger::Builder::from_env(log_env)
-        .filter_module("container_hotplug", args.verbosity.log_level_filter())
-        .format_timestamp(if args.log_format.timestamp {
-            Some(Default::default())
-        } else {
-            None
-        })
-        .format_module_path(args.log_format.path)
-        .format_target(args.log_format.module)
-        .format_level(args.log_format.level)
+    env_logger::Builder::new()
+        .filter_module("container_hotplug", log::LevelFilter::Info)
+        .format_target(false)
+        .parse_env(log_env)
         .init();
+}
+
+fn do_main() -> Result<u8> {
+    let args = cli::Args::parse();
+
+    initialize_logger();
 
     // Check that we're not running rootless. We need to control device access and must be root.
     if !rustix::process::geteuid().is_root() {
@@ -144,7 +138,7 @@ fn do_main() -> Result<u8> {
     };
 
     let rt = tokio::runtime::Runtime::new()?;
-    let result = rt.block_on(run(param, args.verbosity));
+    let result = rt.block_on(run(param));
     rt.shutdown_background();
     result
 }

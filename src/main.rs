@@ -3,6 +3,7 @@ mod cli;
 mod dev;
 mod docker;
 mod hotplug;
+mod runc;
 mod util;
 
 use cli::Action;

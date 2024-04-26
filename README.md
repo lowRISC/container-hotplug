@@ -27,8 +27,8 @@ This program tries to provide a similar functionality for containers, allowing y
 
 ## Usage
 
-This tool wraps `runc` command, with the additional hotplug feature. Therefore, it can be used as a drop in replace for
-many container managers/orchestrators that makes use of runc as runtime. You need to ensure `runc` is available in your `PATH`
+This tool wraps `runc` with the additional hotplug feature, therefore it can be used as a drop in replace for
+many container managers/orchestrators such as Docker, Podman, and Kubernetes. You need to ensure `runc` is available in your `PATH`
 so `container-hotplug` can find it.
 
 It supports two annotations, `org.lowrisc.hotplug.device` and `org.lowrisc.hotplug.symlinks`.
@@ -43,7 +43,7 @@ For Docker, you can specify an alternative runtime by [changing /etc/docker/daem
   }
 }
 ```
-and use it by `--runtime hotplug` and appropriate annotation, e.g.
+and use it with the `--runtime hotplug` flag and appropriate annotation, e.g.
 ```bash
 sudo docker run --runtime hotplug -it --annotation org.lowrisc.hotplug.device=parent-of:usb:2b2e:c310 ubuntu:latest
 ```
@@ -53,7 +53,7 @@ For podman, you can specify the path directly, by:
 sudo podman run --runtime /path/to/container-hotplug/binary -it --annotation org.lowrisc.hotplug.device=parent-of:usb:2b2e:c310 ubuntu:latest
 ```
 
-For containerd (e.g. when using kubernetes), you can `/etc/containerd/config.toml` to add:
+For containerd (e.g. when using kubernetes), you can edit `/etc/containerd/config.toml` to add:
 ```toml
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.hotplug]
   runtime_type = "io.containerd.runc.v2"
@@ -71,7 +71,7 @@ metadata:
   name: hotplug
 handler: hotplug
 ```
-and use it in pod with
+and use it in a pod with
 ```yaml
 apiVersion: v1
 kind: Pod

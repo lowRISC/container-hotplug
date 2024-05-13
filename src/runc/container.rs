@@ -28,10 +28,15 @@ impl CgroupEventNotifier {
 
     fn populated(&mut self) -> Result<bool> {
         let file = self.file.get_mut();
-        file.seek(std::io::SeekFrom::Start(0))
-            .context("Cannot seek to start")?;
+        let Ok(_) = file.seek(std::io::SeekFrom::Start(0)) else {
+            return Ok(false);
+        };
         for line in BufReader::new(file).lines() {
-            let line = line.context("Cannot read line")?;
+            let Ok(line) = line else {
+                // IO errors on cgroup.events file indicate that the cgroup has been deleted, so
+                // it is no longer populated.
+                return Ok(false);
+            };
             if line.starts_with("populated ") {
                 return Ok(line.ends_with('1'));
             }

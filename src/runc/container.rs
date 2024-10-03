@@ -2,8 +2,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek};
 use std::path::Path;
 
-use anyhow::{bail, ensure, Context, Result};
-use rustix::fs::{FileType, Gid, Mode, Uid};
+use anyhow::{bail, Context, Result};
+use rustix::fs::{FileType, Mode};
 use rustix::process::{Pid, Signal};
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
@@ -63,8 +63,10 @@ impl CgroupEventNotifier {
 }
 
 pub struct Container {
-    uid: Uid,
-    gid: Gid,
+    // Uid and gid of the primary container user.
+    // Note that they're inside the user namespace (if any).
+    uid: u32,
+    gid: u32,
     pid: Pid,
     wait: tokio::sync::watch::Receiver<bool>,
     cgroup_device_filter: Mutex<Box<dyn DeviceAccessController + Send>>,
@@ -87,11 +89,9 @@ impl Container {
                 Box::new(DeviceAccessControllerV2::new(&state.cgroup_paths.unified)?)
             };
 
-        ensure!(config.process.user.uid != u32::MAX && config.process.user.gid != u32::MAX);
-
         Ok(Self {
-            uid: unsafe { Uid::from_raw(config.process.user.uid) },
-            gid: unsafe { Gid::from_raw(config.process.user.gid) },
+            uid: config.process.user.uid,
+            gid: config.process.user.gid,
             pid: Pid::from_raw(state.init_process_pid.try_into()?).context("Invalid PID")?,
             wait: recv,
             cgroup_device_filter: Mutex::new(cgroup_device_filter),
@@ -113,7 +113,8 @@ impl Container {
     }
 
     pub async fn mknod(&self, node: &Path, (major, minor): (u32, u32)) -> Result<()> {
-        crate::util::namespace::MntNamespace::of_pid(self.pid)?.enter(|| {
+        let ns = crate::util::namespace::MntNamespace::of_pid(self.pid)?;
+        ns.enter(|| {
             if let Some(parent) = node.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -125,9 +126,7 @@ impl Container {
                 Mode::from(0o644),
                 rustix::fs::makedev(major, minor),
             )?;
-            if !self.uid.is_root() {
-                rustix::fs::chown(node, Some(self.uid), Some(self.gid))?;
-            }
+            std::os::unix::fs::chown(node, Some(ns.uid(self.uid)?), Some(ns.gid(self.gid)?))?;
             Ok(())
         })?
     }

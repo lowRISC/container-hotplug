@@ -23,8 +23,7 @@ use runc::cli::{CreateOptions, GlobalOptions};
 use runc::Container;
 use rustix::fd::OwnedFd;
 use rustix::pipe::PipeFlags;
-use rustix::process::{Signal, WaitOptions};
-use rustix::runtime::Fork;
+use rustix::process::Signal;
 use tokio_stream::StreamExt;
 
 #[derive(Clone)]
@@ -225,21 +224,16 @@ fn do_main() -> Result<()> {
     // or the child process closing it.
     let (parent, child) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC)?;
     // SAFETY: forking is safe because we are single-threaded now.
-    match unsafe { rustix::runtime::fork()? } {
-        Fork::Child(_) => {
+    match safe_fork::fork()? {
+        None => {
             drop(parent);
             tokio::runtime::Runtime::new()?.block_on(create(args.global, create_options, child))?;
         }
-        Fork::Parent(pid) => {
+        Some(pid) => {
             drop(child);
             if rustix::io::read(parent, &mut [0])? == 0 {
                 // In this case, the child process exited before notifying us.
-                std::process::exit(
-                    rustix::process::waitpid(Some(pid), WaitOptions::empty())?
-                        .unwrap()
-                        .exit_status()
-                        .unwrap_or(1) as _,
-                );
+                std::process::exit(pid.join()?.code().unwrap_or(1) as _);
             }
         }
     }

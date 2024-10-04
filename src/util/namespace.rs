@@ -1,22 +1,70 @@
 use std::fs::File;
 use std::os::fd::AsFd;
-use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rustix::fs::{Gid, Uid};
 use rustix::process::Pid;
 use rustix::thread::{CapabilitiesSecureBits, LinkNameSpaceType, UnshareFlags};
 
+pub struct IdMap {
+    map: Vec<(u32, u32, u32)>,
+}
+
+impl IdMap {
+    fn read(path: &Path) -> Result<Self> {
+        Self::parse(&std::fs::read_to_string(path)?)
+    }
+
+    fn parse(content: &str) -> Result<Self> {
+        let mut map = Vec::new();
+        for line in content.lines() {
+            let mut words = line.split_ascii_whitespace();
+            let inside = words.next().context("unexpected id_map")?.parse()?;
+            let outside = words.next().context("unexpected id_map")?.parse()?;
+            let count = words.next().context("unexpected id_map")?.parse()?;
+            map.push((inside, outside, count));
+        }
+        Ok(Self { map })
+    }
+
+    fn translate(&self, id: u32) -> Option<u32> {
+        for &(inside, outside, count) in self.map.iter() {
+            if (inside..inside.checked_add(count)?).contains(&id) {
+                return (id - inside).checked_add(outside);
+            }
+        }
+        None
+    }
+}
+
 pub struct MntNamespace {
-    fd: File,
+    mnt_fd: File,
+    uid_map: IdMap,
+    gid_map: IdMap,
 }
 
 impl MntNamespace {
     /// Open the mount namespace of a process.
     pub fn of_pid(pid: Pid) -> Result<MntNamespace> {
-        let path = format!("/proc/{}/ns/mnt", pid.as_raw_nonzero());
-        let fd = File::open(path)?;
-        Ok(MntNamespace { fd })
+        let mnt_fd = File::open(format!("/proc/{}/ns/mnt", pid.as_raw_nonzero()))?;
+        let uid_map = IdMap::read(format!("/proc/{}/uid_map", pid.as_raw_nonzero()).as_ref())?;
+        let gid_map = IdMap::read(format!("/proc/{}/gid_map", pid.as_raw_nonzero()).as_ref())?;
+        Ok(MntNamespace {
+            mnt_fd,
+            uid_map,
+            gid_map,
+        })
+    }
+
+    /// Translate user ID into a UID in the namespace.
+    pub fn uid(&self, uid: u32) -> Result<Uid> {
+        Ok(unsafe { Uid::from_raw(self.uid_map.translate(uid).context("UID overflows")?) })
+    }
+
+    /// Translate group ID into a GID in the namespace.
+    pub fn gid(&self, gid: u32) -> Result<Gid> {
+        Ok(unsafe { Gid::from_raw(self.gid_map.translate(gid).context("GID overflows")?) })
     }
 
     /// Enter the mount namespace.
@@ -32,7 +80,7 @@ impl MntNamespace {
 
                     // Switch this particular thread to the container's mount namespace.
                     rustix::thread::move_into_link_name_space(
-                        self.fd.as_fd(),
+                        self.mnt_fd.as_fd(),
                         Some(LinkNameSpaceType::Mount),
                     )?;
 
@@ -51,9 +99,6 @@ impl MntNamespace {
                     //
                     // https://elixir.bootlin.com/linux/v6.11.1/source/fs/namei.c#L4073
                     // https://elixir.bootlin.com/linux/v6.11.1/source/include/linux/cred.h#L111
-                    let metadata = std::fs::metadata("/")?;
-                    let uid = metadata.uid();
-                    let gid = metadata.gid();
 
                     // By default `setuid` will drop capabilities when transitioning from root
                     // to non-root user. This bit prevents it so our code still have superpower.
@@ -61,8 +106,8 @@ impl MntNamespace {
                         CapabilitiesSecureBits::NO_SETUID_FIXUP,
                     )?;
 
-                    rustix::thread::set_thread_uid(unsafe { Uid::from_raw(uid) })?;
-                    rustix::thread::set_thread_gid(unsafe { Gid::from_raw(gid) })?;
+                    rustix::thread::set_thread_uid(self.uid(0)?)?;
+                    rustix::thread::set_thread_gid(self.gid(0)?)?;
 
                     Ok(f())
                 })

@@ -8,5 +8,8 @@ pkgs.mkShell {
 
     # For llvm-objdump
     llvmPackages.bintools
+
+    # To aid testing
+    runc
   ];
 }

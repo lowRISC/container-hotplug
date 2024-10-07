@@ -57,6 +57,11 @@ impl MntNamespace {
         })
     }
 
+    /// Check if we're in an user namespace.
+    pub fn in_user_ns(&self) -> bool {
+        !(self.uid_map.map == &[(0, 0, u32::MAX)] && self.gid_map.map == &[(0, 0, u32::MAX)])
+    }
+
     /// Translate user ID into a UID in the namespace.
     pub fn uid(&self, uid: u32) -> Result<u32> {
         Ok(self.uid_map.translate(uid).context("UID overflows")?)

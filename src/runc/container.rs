@@ -1,9 +1,12 @@
-use std::fs::File;
+use std::fs::{File, Permissions};
 use std::io::{BufRead, BufReader, Seek};
+use std::os::fd::AsFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use rustix::fs::{FileType, Mode};
+use rustix::fs::{FileType, Mode, UnmountFlags};
+use rustix::mount::{FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags};
 use rustix::process::{Pid, Signal};
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
@@ -89,13 +92,113 @@ impl Container {
                 Box::new(DeviceAccessControllerV2::new(&state.cgroup_paths.unified)?)
             };
 
-        Ok(Self {
+        let container = Self {
             uid: config.process.user.uid,
             gid: config.process.user.gid,
             pid: Pid::from_raw(state.init_process_pid.try_into()?).context("Invalid PID")?,
             wait: recv,
             cgroup_device_filter: Mutex::new(cgroup_device_filter),
-        })
+        };
+
+        container.remount_dev()?;
+
+        Ok(container)
+    }
+
+    /// Remount /dev inside the init namespace.
+    ///
+    /// When user namespace is used, the /dev created by runc will be mounted inside the user namespace,
+    /// and will automatically gain SB_I_NODEV flag as a kernel security measure.
+    ///
+    /// This is doing no favour for us because that flag will cause device node within it to be unopenable.
+    fn remount_dev(&self) -> Result<()> {
+        let ns = crate::util::namespace::MntNamespace::of_pid(self.pid)?;
+        if !ns.in_user_ns() {
+            return Ok(());
+        }
+
+        log::info!("Remount /dev to allow device node access");
+
+        // Create a tmpfs and mount in the init namespace.
+        // Note that while we have "mounted" it, it is not associated with any mount point yet.
+        // The actual mounting will happen after we moved into the mount namespace.
+        let dev_fs = rustix::mount::fsopen("tmpfs", FsOpenFlags::empty())?;
+        rustix::mount::fsconfig_create(dev_fs.as_fd())?;
+        let dev_mnt = rustix::mount::fsmount(
+            dev_fs.as_fd(),
+            FsMountFlags::FSMOUNT_CLOEXEC,
+            MountAttrFlags::empty(),
+        )?;
+
+        ns.enter(|| -> Result<_> {
+            // Don't interfere us setting the desired mode!
+            rustix::process::umask(Mode::empty());
+
+            // Move the existing mount elsewhere.
+            std::fs::create_dir("/olddev")?;
+            rustix::mount::mount_move("/dev", "/olddev")?;
+
+            // Move to our newly created `/dev` mount.
+            rustix::mount::move_mount(
+                dev_mnt.as_fd(),
+                "",
+                rustix::fs::CWD,
+                "/dev",
+                MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
+            )?;
+
+            // Make sure the /dev is now owned by the container root not host root.
+            std::os::unix::fs::chown("/dev", Some(ns.uid(0)?), Some(ns.gid(0)?))?;
+            std::fs::set_permissions("/dev", Permissions::from_mode(0o755))?;
+
+            for file in std::fs::read_dir("/olddev")? {
+                let file = file?;
+                let metadata = file.metadata()?;
+                let new_path = Path::new("/dev").join(file.file_name());
+
+                if file.file_name() == "console" {
+                    // `console` is special, it's a file but it should be bind-mounted.
+                    drop(
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .open(&new_path)?,
+                    );
+                    rustix::mount::mount_move(file.path(), new_path)?;
+                } else if metadata.file_type().is_dir() {
+                    // This is a mount point, e.g. pts, mqueue, shm.
+                    std::fs::create_dir(&new_path)?;
+                    rustix::mount::mount_move(file.path(), new_path)?;
+                } else if metadata.file_type().is_symlink() {
+                    // Recreate symlinks
+                    let target = std::fs::read_link(file.path())?;
+                    std::os::unix::fs::symlink(target, new_path)?;
+                } else if metadata.file_type().is_char_device() {
+                    // Recreate device
+                    let dev = metadata.rdev();
+                    rustix::fs::mknodat(
+                        rustix::fs::CWD,
+                        &new_path,
+                        FileType::CharacterDevice,
+                        Mode::from_raw_mode(metadata.mode()),
+                        dev,
+                    )?;
+
+                    // The old file might be a bind mount. Try umount it.
+                    let _ = rustix::mount::unmount(file.path(), UnmountFlags::DETACH);
+                } else {
+                    anyhow::bail!("Unknown file present in /dev");
+                }
+            }
+
+            // Now we have moved everything to the new /dev, obliterate the old one.
+            rustix::mount::unmount("/olddev", UnmountFlags::DETACH)?;
+            std::fs::remove_dir("/olddev")?;
+
+            Ok(())
+        })??;
+
+        Ok(())
     }
 
     pub async fn kill(&self, signal: Signal) -> Result<()> {

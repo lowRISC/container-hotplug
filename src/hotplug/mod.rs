@@ -70,8 +70,12 @@ impl HotPlug {
                     .filter_map(|dev| dev.matches(&device))
                     .collect();
 
-                self.container.device(devnode.devnum, Access::all()).await?;
-                self.container.mknod(&devnode.path, devnode.devnum).await?;
+                self.container
+                    .device(devnode.ty, devnode.devnum, Access::all())
+                    .await?;
+                self.container
+                    .mknod(&devnode.path, devnode.ty, devnode.devnum)
+                    .await?;
                 for symlink in &symlinks {
                     self.container.symlink(&devnode.path, symlink).await?;
                 }
@@ -89,7 +93,7 @@ impl HotPlug {
 
                 let devnode = device.devnode().unwrap();
                 self.container
-                    .device(devnode.devnum, Access::empty())
+                    .device(devnode.ty, devnode.devnum, Access::empty())
                     .await?;
                 self.container.rm(&devnode.path).await?;
                 for symlink in &device.symlinks {

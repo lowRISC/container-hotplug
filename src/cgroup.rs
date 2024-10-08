@@ -7,8 +7,8 @@ use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 
 // The numerical representation below needs to match BPF_DEVCG constants.
-#[allow(unused)]
 #[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceType {
     Block = 1,
     Character = 2,

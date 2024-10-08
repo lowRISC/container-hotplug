@@ -215,7 +215,12 @@ impl Container {
         Ok(())
     }
 
-    pub async fn mknod(&self, node: &Path, (major, minor): (u32, u32)) -> Result<()> {
+    pub async fn mknod(
+        &self,
+        node: &Path,
+        ty: DeviceType,
+        (major, minor): (u32, u32),
+    ) -> Result<()> {
         let ns = crate::util::namespace::MntNamespace::of_pid(self.pid)?;
         ns.enter(|| {
             if let Some(parent) = node.parent() {
@@ -225,7 +230,11 @@ impl Container {
             rustix::fs::mknodat(
                 rustix::fs::CWD,
                 node,
-                FileType::CharacterDevice,
+                if ty == DeviceType::Character {
+                    FileType::CharacterDevice
+                } else {
+                    FileType::BlockDevice
+                },
                 Mode::from(0o644),
                 rustix::fs::makedev(major, minor),
             )?;
@@ -252,13 +261,16 @@ impl Container {
         })
     }
 
-    pub async fn device(&self, (major, minor): (u32, u32), access: Access) -> Result<()> {
-        self.cgroup_device_filter.lock().await.set_permission(
-            DeviceType::Character,
-            major,
-            minor,
-            access,
-        )?;
+    pub async fn device(
+        &self,
+        ty: DeviceType,
+        (major, minor): (u32, u32),
+        access: Access,
+    ) -> Result<()> {
+        self.cgroup_device_filter
+            .lock()
+            .await
+            .set_permission(ty, major, minor, access)?;
         Ok(())
     }
 }

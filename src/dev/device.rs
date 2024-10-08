@@ -1,9 +1,12 @@
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 
+use crate::cgroup::DeviceType;
+
 #[derive(Debug, Clone)]
 pub struct DevNode {
     pub path: PathBuf,
+    pub ty: DeviceType,
     pub devnum: (u32, u32),
 }
 
@@ -16,17 +19,22 @@ pub struct Device {
 
 impl Device {
     pub fn from_udev(device: udev::Device) -> Self {
-        let devnode = device
-            .devnum()
-            .zip(device.devnode())
-            .map(|(devnum, devnode)| {
-                let major = rustix::fs::major(devnum);
-                let minor = rustix::fs::minor(devnum);
-                DevNode {
-                    path: devnode.to_owned(),
-                    devnum: (major, minor),
-                }
-            });
+        let devnode = device.devnode().and_then(|devnode| {
+            let devnum = device.devnum()?;
+            let major = rustix::fs::major(devnum);
+            let minor = rustix::fs::minor(devnum);
+            // Only block subsystem produce block device, everything else are character device.
+            let ty = if device.subsystem()? == "block" {
+                DeviceType::Block
+            } else {
+                DeviceType::Character
+            };
+            Some(DevNode {
+                path: devnode.to_owned(),
+                ty,
+                devnum: (major, minor),
+            })
+        });
         Self { device, devnode }
     }
 

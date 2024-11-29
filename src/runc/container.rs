@@ -85,6 +85,22 @@ impl Container {
             }
         });
 
+        // runc configures systemd to also perform device filtering.
+        // The removal of systemd's filtering is insufficient since after daemon-reload (or maybe
+        // some other triggers as well), systemd will reconcile and add it back, which disrupts
+        // container-hotplug's operation.
+        // So we'll also go ahead and remove these configuration files. Ignore errors if any since
+        // the cgroup might be handled by runc directly if `--cgroup-manager=cgroupfs` is used.
+        let cgroup_name = state
+            .cgroup_paths
+            .unified
+            .file_name()
+            .context("cgroup doesn't have file name")?
+            .to_str()
+            .context("cgroup name is not UTF-8")?;
+        let _ = std::fs::remove_file(format!("/run/systemd/transient/{cgroup_name}.d/50-DeviceAllow.conf"));
+        let _ = std::fs::remove_file(format!("/run/systemd/transient/{cgroup_name}.d/50-DevicePolicy.conf"));
+
         let cgroup_device_filter: Box<dyn DeviceAccessController + Send> =
             if let Some(device_cgroup) = &state.cgroup_paths.devices {
                 Box::new(DeviceAccessControllerV1::new(device_cgroup)?)

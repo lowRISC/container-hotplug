@@ -1,7 +1,7 @@
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use clap::ValueEnum;
-use once_cell::sync::Lazy;
 
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
@@ -52,7 +52,7 @@ pub enum Subcommand {
     Other(Vec<String>),
 }
 
-static BUNDLE_DEFAULT: Lazy<PathBuf> = Lazy::new(|| std::env::current_dir().unwrap());
+static BUNDLE_DEFAULT: LazyLock<PathBuf> = LazyLock::new(|| std::env::current_dir().unwrap());
 
 #[derive(clap::Args)]
 pub struct CreateOptions {

@@ -1,6 +1,6 @@
 use anyhow::{ensure, Context, Result};
 use aya::maps::{HashMap, MapData};
-use aya::programs::{CgroupDevice, Link};
+use aya::programs::{CgroupDevice, Link, CgroupAttachMode};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::mem::ManuallyDrop;
@@ -150,7 +150,7 @@ impl DeviceAccessControllerV2 {
         // Wrap this inside `ManuallyDrop` to prevent accidental detaching.
         let existing_programs = ManuallyDrop::new(CgroupDevice::query(&cgroup_fd)?);
 
-        let link_id = program.attach(&cgroup_fd)?;
+        let link_id = program.attach(&cgroup_fd, CgroupAttachMode::Single)?;
 
         // Forget the link so it won't be detached on drop.
         let link = program.take_link(link_id);

@@ -4,7 +4,7 @@ pkgs.mkShell {
   nativeBuildInputs = with pkgs; [
     rustup
     pkg-config
-    (pkgs.callPackage deps/bpf-linker.nix { useRustLlvm = true; })
+    bpf-linker
 
     # For llvm-objdump
     llvmPackages.bintools

@@ -1,6 +1,6 @@
 use anyhow::{ensure, Context, Result};
 use aya::maps::{HashMap, MapData};
-use aya::programs::{CgroupDevice, Link, CgroupAttachMode};
+use aya::programs::{CgroupAttachMode, CgroupDevice, Link};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::mem::ManuallyDrop;

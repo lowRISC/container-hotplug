@@ -5,8 +5,8 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use rustix::fs::{FileType, Mode, UnmountFlags};
-use rustix::mount::{FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags};
+use rustix::fs::{FileType, Mode};
+use rustix::mount::{FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags, UnmountFlags};
 use rustix::process::{Pid, Signal};
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
@@ -98,8 +98,12 @@ impl Container {
             .context("cgroup doesn't have file name")?
             .to_str()
             .context("cgroup name is not UTF-8")?;
-        let _ = std::fs::remove_file(format!("/run/systemd/transient/{cgroup_name}.d/50-DeviceAllow.conf"));
-        let _ = std::fs::remove_file(format!("/run/systemd/transient/{cgroup_name}.d/50-DevicePolicy.conf"));
+        let _ = std::fs::remove_file(format!(
+            "/run/systemd/transient/{cgroup_name}.d/50-DeviceAllow.conf"
+        ));
+        let _ = std::fs::remove_file(format!(
+            "/run/systemd/transient/{cgroup_name}.d/50-DevicePolicy.conf"
+        ));
 
         let cgroup_device_filter: Box<dyn DeviceAccessController + Send> =
             if let Some(device_cgroup) = &state.cgroup_paths.devices {

@@ -111,8 +111,8 @@ impl MntNamespace {
                         CapabilitiesSecureBits::NO_SETUID_FIXUP,
                     )?;
 
-                    rustix::thread::set_thread_uid(unsafe { Uid::from_raw(self.uid(0)?) })?;
-                    rustix::thread::set_thread_gid(unsafe { Gid::from_raw(self.gid(0)?) })?;
+                    rustix::thread::set_thread_uid(Uid::from_raw(self.uid(0)?))?;
+                    rustix::thread::set_thread_gid(Gid::from_raw(self.gid(0)?))?;
 
                     Ok(f())
                 })

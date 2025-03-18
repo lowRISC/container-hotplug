@@ -133,7 +133,7 @@ async fn create(global: GlobalOptions, create: CreateOptions, notifier: OwnedFd)
             }
             Event::Detach(dev) if dev.syspath() == hub_path => {
                 info!("Hub device detached. Stopping container.");
-                let _ = container.kill(Signal::Kill).await;
+                let _ = container.kill(Signal::KILL).await;
                 container.wait().await?;
                 break;
             }

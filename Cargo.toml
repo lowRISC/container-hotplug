@@ -11,12 +11,12 @@ anyhow = { version = "1", features = ["backtrace"] }
 log = "0.4"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
-thiserror = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 udev = "0.9"
-rustix = { version = "0.38", features = ["fs", "stdio", "process", "thread", "pipe", "mount"] }
+rustix = { version = "1", features = ["fs", "stdio", "process", "thread", "pipe", "mount"] }
 bitflags = "2"
 humantime = "2"
 serde = { version = "1", features = ["derive"] }

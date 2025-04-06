@@ -1,4 +1,4 @@
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use aya::maps::{HashMap, MapData};
 use aya::programs::{CgroupAttachMode, CgroupDevice, Link};
 use std::ffi::OsStr;

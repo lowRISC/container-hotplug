@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::{bail, ensure, Error, Result};
+use anyhow::{Error, Result, bail, ensure};
 
 use crate::dev::Device;
 
@@ -50,7 +50,10 @@ impl FromStr for Symlink {
         match kind {
             "usb" => {
                 let parts: Vec<_> = dev.split(':').collect();
-                ensure!(parts.len() == 3, "Symlink DEVICE format for usb should be `<VID>:<PID>:<INTERFACE>`, found `{dev}`.");
+                ensure!(
+                    parts.len() == 3,
+                    "Symlink DEVICE format for usb should be `<VID>:<PID>:<INTERFACE>`, found `{dev}`."
+                );
 
                 let vid = parts[0];
                 let pid = parts[1];

@@ -4,12 +4,12 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rustix::fs::{FileType, Mode};
 use rustix::mount::{FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags, UnmountFlags};
 use rustix::process::{Pid, Signal};
-use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::Mutex;
 
 use crate::cgroup::{

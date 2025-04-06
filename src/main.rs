@@ -16,11 +16,11 @@ use std::pin::pin;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use log::info;
-use runc::cli::{CreateOptions, GlobalOptions};
 use runc::Container;
+use runc::cli::{CreateOptions, GlobalOptions};
 use rustix::fd::OwnedFd;
 use rustix::pipe::PipeFlags;
 use rustix::process::Signal;
@@ -118,9 +118,11 @@ async fn create(global: GlobalOptions, create: CreateOptions, notifier: OwnedFd)
         }
     };
 
-    let mut stream = pin!(tokio_stream::empty()
-        .merge(hotplug_stream)
-        .merge(container_stream));
+    let mut stream = pin!(
+        tokio_stream::empty()
+            .merge(hotplug_stream)
+            .merge(container_stream)
+    );
 
     loop {
         let event = stream.try_next().await?.context("No more events")?;

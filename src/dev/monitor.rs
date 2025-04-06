@@ -2,12 +2,12 @@
 //!
 //! Provides async support and convience methods to monitor devices and retrieve device properties.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::task::{ready, Poll};
+use std::task::{Poll, ready};
 
 use anyhow::Result;
 use tokio::io::unix::AsyncFd;

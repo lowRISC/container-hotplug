@@ -1,5 +1,7 @@
 mod attached_device;
+mod kobject_uevent;
 pub use attached_device::AttachedDevice;
+pub use kobject_uevent::UdevSender;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,6 +22,7 @@ pub struct HotPlug {
     symlinks: Vec<cli::Symlink>,
     monitor: DeviceMonitor,
     devices: HashMap<PathBuf, AttachedDevice>,
+    udev_sender: UdevSender,
 }
 
 impl HotPlug {
@@ -31,11 +34,16 @@ impl HotPlug {
         let monitor = DeviceMonitor::new(hub_path.clone())?;
         let devices = Default::default();
 
+        let udev_sender = UdevSender::new(crate::util::namespace::NetNamespace::of_pid(
+            container.pid(),
+        )?)?;
+
         Ok(Self {
             container,
             symlinks,
             monitor,
             devices,
+            udev_sender,
         })
     }
 
@@ -80,6 +88,8 @@ impl HotPlug {
                     self.container.symlink(&devnode.path, symlink).await?;
                 }
 
+                self.udev_sender.send(device.udev(), "add")?;
+
                 let syspath = device.syspath().to_owned();
                 let device = AttachedDevice { device, symlinks };
                 self.devices.insert(syspath, device.clone());
@@ -99,6 +109,8 @@ impl HotPlug {
                 for symlink in &device.symlinks {
                     self.container.rm(symlink).await?;
                 }
+
+                self.udev_sender.send(device.udev(), "remove")?;
 
                 Ok(Some(Event::Detach(device)))
             }

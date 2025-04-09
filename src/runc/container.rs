@@ -125,6 +125,10 @@ impl Container {
         Ok(container)
     }
 
+    pub fn pid(&self) -> Pid {
+        self.pid
+    }
+
     /// Remount /dev inside the init namespace.
     ///
     /// When user namespace is used, the /dev created by runc will be mounted inside the user namespace,

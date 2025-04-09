@@ -153,3 +153,48 @@ impl MntNamespace {
         })
     }
 }
+
+pub struct NetNamespace {
+    net_fd: File,
+    user_ns: UserNamespace,
+}
+
+impl NetNamespace {
+    /// Open the network namespace of a process.
+    pub fn of_pid(pid: Pid) -> Result<NetNamespace> {
+        let net_fd = File::open(format!("/proc/{}/ns/net", pid.as_raw_nonzero()))?;
+        let user_ns = UserNamespace::of_pid(pid)?;
+        Ok(NetNamespace { net_fd, user_ns })
+    }
+
+    /// Enter the network namespace.
+    ///
+    /// This operation is not reversible.
+    pub fn enter(&self) -> Result<()> {
+        // Switch this particular thread to the container's network namespace.
+        rustix::thread::move_into_link_name_space(
+            self.net_fd.as_fd(),
+            Some(LinkNameSpaceType::Network),
+        )?;
+
+        // Similar to mount namespace, we also want to behave as container root.
+        // This is so that SCM credentials are seen properly.
+        self.user_ns.enter()?;
+        Ok(())
+    }
+
+    /// Execute inside the mount namespace.
+    pub fn with<T: Send, F: FnOnce() -> T + Send>(&self, f: F) -> Result<T> {
+        // To avoid messing with rest of the process, we do everything in a new thread.
+        // Use scoped thread to avoid 'static bound (we need to access fd).
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| -> Result<T> {
+                    self.enter()?;
+                    Ok(f())
+                })
+                .join()
+                .map_err(|_| anyhow::anyhow!("work thread panicked"))?
+        })
+    }
+}

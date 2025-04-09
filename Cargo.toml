@@ -17,13 +17,15 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 udev = "0.9"
-rustix = { version = "1", features = ["fs", "stdio", "process", "thread", "pipe", "mount"] }
+rustix = { version = "1", features = ["fs", "stdio", "process", "thread", "pipe", "mount", "net"] }
 bitflags = "2"
 humantime = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 safe-fork = "0.1.1"
 aya = "0.13"
+murmur2 = "0.1.0"
+zerocopy = { version = "0.8.24", features = ["derive"] }
 
 [build-dependencies]
 anyhow = { version = "1", features = ["backtrace"] }

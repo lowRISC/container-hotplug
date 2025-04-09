@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::ops::Deref;
 use std::os::fd::AsFd;
 use std::path::Path;
 
@@ -38,23 +39,17 @@ impl IdMap {
     }
 }
 
-pub struct MntNamespace {
-    mnt_fd: File,
+pub struct UserNamespace {
     uid_map: IdMap,
     gid_map: IdMap,
 }
 
-impl MntNamespace {
+impl UserNamespace {
     /// Open the mount namespace of a process.
-    pub fn of_pid(pid: Pid) -> Result<MntNamespace> {
-        let mnt_fd = File::open(format!("/proc/{}/ns/mnt", pid.as_raw_nonzero()))?;
+    pub fn of_pid(pid: Pid) -> Result<Self> {
         let uid_map = IdMap::read(format!("/proc/{}/uid_map", pid.as_raw_nonzero()).as_ref())?;
         let gid_map = IdMap::read(format!("/proc/{}/gid_map", pid.as_raw_nonzero()).as_ref())?;
-        Ok(MntNamespace {
-            mnt_fd,
-            uid_map,
-            gid_map,
-        })
+        Ok(Self { uid_map, gid_map })
     }
 
     /// Check if we're in an user namespace.
@@ -72,48 +67,85 @@ impl MntNamespace {
         Ok(self.gid_map.translate(gid).context("GID overflows")?)
     }
 
+    /// "Enter" the user namespace.
+    ///
+    /// This operation is not reversible.
+    ///
+    /// This does not actually enter the user namespace, but rather just switch to become the root
+    /// user inside the namespace.
+    ///
+    /// Entering the user namespace turns out to be problematic.
+    /// The reason seems to be this line [1]:
+    /// which means `CAP_MKNOD` capability of the *init* namespace is needed.
+    /// However task's associated security context is all relative to its current
+    /// user namespace [2], so once you enter a user namespace there's no way of getting
+    /// back `CAP_MKNOD` of the init namespace anymore.
+    /// (Yes this means that even if CAP_MKNOD is granted to the container, you cannot
+    /// create device nodes within it.)
+    ///
+    /// [1]: https://elixir.bootlin.com/linux/v6.11.1/source/fs/namei.c#L4073
+    /// [2]: https://elixir.bootlin.com/linux/v6.11.1/source/include/linux/cred.h#L111
+    pub fn enter(&self) -> Result<()> {
+        // By default `setuid` will drop capabilities when transitioning from root
+        // to non-root user. This bit prevents it so our code still have superpower.
+        rustix::thread::set_capabilities_secure_bits(CapabilitiesSecureBits::NO_SETUID_FIXUP)?;
+
+        rustix::thread::set_thread_uid(Uid::from_raw(self.uid(0)?))?;
+        rustix::thread::set_thread_gid(Gid::from_raw(self.gid(0)?))?;
+        Ok(())
+    }
+}
+
+pub struct MntNamespace {
+    mnt_fd: File,
+    user_ns: UserNamespace,
+}
+
+impl Deref for MntNamespace {
+    type Target = UserNamespace;
+
+    fn deref(&self) -> &UserNamespace {
+        &self.user_ns
+    }
+}
+
+impl MntNamespace {
+    /// Open the mount namespace of a process.
+    pub fn of_pid(pid: Pid) -> Result<MntNamespace> {
+        let mnt_fd = File::open(format!("/proc/{}/ns/mnt", pid.as_raw_nonzero()))?;
+        let user_ns = UserNamespace::of_pid(pid)?;
+        Ok(MntNamespace { mnt_fd, user_ns })
+    }
+
     /// Enter the mount namespace.
-    pub fn enter<T: Send, F: FnOnce() -> T + Send>(&self, f: F) -> Result<T> {
+    ///
+    /// This operation is not reversible.
+    pub fn enter(&self) -> Result<()> {
+        // Unshare FS for this specific thread so we can switch to another namespace.
+        // Not doing this will cause EINVAL when switching to namespaces.
+        rustix::thread::unshare(UnshareFlags::FS)?;
+
+        // Switch this particular thread to the container's mount namespace.
+        rustix::thread::move_into_link_name_space(
+            self.mnt_fd.as_fd(),
+            Some(LinkNameSpaceType::Mount),
+        )?;
+
+        // If user namespace is used, we must act like the root user *inside*
+        // namespace to be able to create files properly (otherwise EOVERFLOW
+        // will be returned when creating file).
+        self.user_ns.enter()?;
+        Ok(())
+    }
+
+    /// Execute inside the mount namespace.
+    pub fn with<T: Send, F: FnOnce() -> T + Send>(&self, f: F) -> Result<T> {
         // To avoid messing with rest of the process, we do everything in a new thread.
         // Use scoped thread to avoid 'static bound (we need to access fd).
         std::thread::scope(|scope| {
             scope
                 .spawn(|| -> Result<T> {
-                    // Unshare FS for this specific thread so we can switch to another namespace.
-                    // Not doing this will cause EINVAL when switching to namespaces.
-                    rustix::thread::unshare(UnshareFlags::FS)?;
-
-                    // Switch this particular thread to the container's mount namespace.
-                    rustix::thread::move_into_link_name_space(
-                        self.mnt_fd.as_fd(),
-                        Some(LinkNameSpaceType::Mount),
-                    )?;
-
-                    // If user namespace is used, we must act like the root user *inside*
-                    // namespace to be able to create files properly (otherwise EOVERFLOW
-                    // will be returned when creating file).
-                    //
-                    // Entering the user namespace turns out to be problematic.
-                    // The reason seems to be this line [1]:
-                    // which means `CAP_MKNOD` capability of the *init* namespace is needed.
-                    // However task's associated security context is all relative to its current
-                    // user namespace [2], so once you enter a user namespace there's no way of getting
-                    // back `CAP_MKNOD` of the init namespace anymore.
-                    // (Yes this means that even if CAP_MKNOD is granted to the container, you cannot
-                    // create device nodes within it.)
-                    //
-                    // [1]: https://elixir.bootlin.com/linux/v6.11.1/source/fs/namei.c#L4073
-                    // [2]: https://elixir.bootlin.com/linux/v6.11.1/source/include/linux/cred.h#L111
-
-                    // By default `setuid` will drop capabilities when transitioning from root
-                    // to non-root user. This bit prevents it so our code still have superpower.
-                    rustix::thread::set_capabilities_secure_bits(
-                        CapabilitiesSecureBits::NO_SETUID_FIXUP,
-                    )?;
-
-                    rustix::thread::set_thread_uid(Uid::from_raw(self.uid(0)?))?;
-                    rustix::thread::set_thread_gid(Gid::from_raw(self.gid(0)?))?;
-
+                    self.enter()?;
                     Ok(f())
                 })
                 .join()

@@ -150,7 +150,7 @@ impl Container {
             MountAttrFlags::empty(),
         )?;
 
-        ns.enter(|| -> Result<_> {
+        ns.with(|| -> Result<_> {
             // Don't interfere us setting the desired mode!
             rustix::process::umask(Mode::empty());
 
@@ -242,7 +242,7 @@ impl Container {
         (major, minor): (u32, u32),
     ) -> Result<()> {
         let ns = crate::util::namespace::MntNamespace::of_pid(self.pid)?;
-        ns.enter(|| {
+        ns.with(|| {
             if let Some(parent) = node.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -264,7 +264,7 @@ impl Container {
     }
 
     pub async fn symlink(&self, source: &Path, link: &Path) -> Result<()> {
-        crate::util::namespace::MntNamespace::of_pid(self.pid)?.enter(|| {
+        crate::util::namespace::MntNamespace::of_pid(self.pid)?.with(|| {
             if let Some(parent) = link.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -276,7 +276,7 @@ impl Container {
     }
 
     pub async fn rm(&self, node: &Path) -> Result<()> {
-        crate::util::namespace::MntNamespace::of_pid(self.pid)?.enter(|| {
+        crate::util::namespace::MntNamespace::of_pid(self.pid)?.with(|| {
             let _ = std::fs::remove_file(node);
         })
     }

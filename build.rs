@@ -24,6 +24,7 @@ fn main() -> Result<()> {
     // Run cargo to compile the eBPF program.
     let status = std::process::Command::new("cargo")
         .current_dir("cgroup_device_filter")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .args(["build", "--release"])
         .status()?;
 

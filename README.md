@@ -15,8 +15,8 @@ However this would still give the container access to all the devices handled by
 This program tries to solve that problem by listening to udev events to detect when a device is (un)plugged.
 It then interfaces directly with the container's cgroup to grant it access to that specific device.
 
-To limit the devices the container can access, a _root device_ is specified.
-The container will receive access to any device descending from the root device.
+To limit the devices the container can access, _root devices_ are specified.
+The container will receive access to any device descending from one of the root devices.
 This is particularly useful if the root device is set to a USB hub.
 The hub can be specified directly, or it can be specified as "the parent of device X",
 e.g., we can giving a container access to all devices connected to the same hub as an Arduino board.
@@ -31,7 +31,7 @@ This tool wraps `runc` with the additional hotplug feature, therefore it can be 
 many container managers/orchestrators such as Docker, Podman, and Kubernetes. You need to ensure `runc` is available in your `PATH`
 so `container-hotplug` can find it.
 
-It supports two annotations, `org.lowrisc.hotplug.device` and `org.lowrisc.hotplug.symlinks`.
+It supports two annotations, `org.lowrisc.hotplug.devices` and `org.lowrisc.hotplug.symlinks`.
 
 For Docker, you can specify an alternative runtime by [changing /etc/docker/daemon.json](https://docs.docker.com/engine/alternative-runtimes/#youki):
 ```json
@@ -45,12 +45,12 @@ For Docker, you can specify an alternative runtime by [changing /etc/docker/daem
 ```
 and use it with the `--runtime hotplug` flag and appropriate annotation, e.g.
 ```bash
-sudo docker run --runtime hotplug -it --annotation org.lowrisc.hotplug.device=parent-of:usb:2b2e:c310 ubuntu:latest
+sudo docker run --runtime hotplug -it --annotation org.lowrisc.hotplug.devices=parent-of:usb:2b2e:c310 ubuntu:latest
 ```
 
 For podman, you can specify the path directly, by:
 ```bash
-sudo podman run --runtime /path/to/container-hotplug/binary -it --annotation org.lowrisc.hotplug.device=parent-of:usb:2b2e:c310 ubuntu:latest
+sudo podman run --runtime /path/to/container-hotplug/binary -it --annotation org.lowrisc.hotplug.devices=parent-of:usb:2b2e:c310 ubuntu:latest
 ```
 
 For containerd (e.g. when using kubernetes), you can edit `/etc/containerd/config.toml` to add:
@@ -78,7 +78,7 @@ kind: Pod
 metadata:
   name: ubuntu
   annotations:
-    org.lowrisc.hotplug.device: parent-of:usb:0bda:5634
+    org.lowrisc.hotplug.devices: parent-of:usb:0bda:5634
 spec:
   runtimeClassName: hotplug
   containers:

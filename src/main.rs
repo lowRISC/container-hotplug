@@ -57,13 +57,18 @@ async fn create(global: GlobalOptions, create: CreateOptions, notifier: OwnedFd)
     let mut notifier = Some(notifier);
 
     let config = runc::config::Config::from_bundle(&create.bundle)?;
-    let device: DeviceRef = config
+    let mut devices = Vec::new();
+    let device_annotation = config
         .annotations
-        .get("org.lowrisc.hotplug.device")
+        .get("org.lowrisc.hotplug.devices")
+        .or_else(|| config.annotations.get("org.lowrisc.hotplug.device"))
         .context(
-            "Cannot find annotation `org.lowrisc.hotplug.device`. Please use normal runc instead.",
-        )?
-        .parse()?;
+            "Cannot find annotation `org.lowrisc.hotplug.devices`. Please use normal runc instead.",
+        )?;
+    for device in device_annotation.split(',') {
+        let devref: DeviceRef = device.parse()?;
+        devices.push(devref.device()?.syspath().to_owned());
+    }
 
     let mut symlinks = Vec::<Symlink>::new();
     if let Some(symlink_annotation) = config.annotations.get("org.lowrisc.hotplug.symlinks") {
@@ -71,9 +76,6 @@ async fn create(global: GlobalOptions, create: CreateOptions, notifier: OwnedFd)
             symlinks.push(symlink.parse()?);
         }
     }
-
-    // Run this before calling into runc to create the container.
-    let hub_path = device.device()?.syspath().to_owned();
 
     // Switch the logger to syslog. The runc logs are barely forwarded to the user or syslog by
     // container managers and orchestrators, while we do want to preserve the hotplug events.
@@ -107,7 +109,7 @@ async fn create(global: GlobalOptions, create: CreateOptions, notifier: OwnedFd)
     rustix::stdio::dup2_stdout(&null)?;
     rustix::stdio::dup2_stderr(null)?;
 
-    let mut hotplug = HotPlug::new(Arc::clone(&container), hub_path.clone(), symlinks)?;
+    let mut hotplug = HotPlug::new(Arc::clone(&container), devices.clone(), symlinks)?;
     let hotplug_stream = hotplug.run();
 
     let container_stream = {
@@ -133,7 +135,7 @@ async fn create(global: GlobalOptions, create: CreateOptions, notifier: OwnedFd)
                 let notifier = notifier.take().context("Initialized event seen twice")?;
                 rustix::io::write(notifier, &[0])?;
             }
-            Event::Detach(dev) if dev.syspath() == hub_path => {
+            Event::Detach(dev) if devices.iter().any(|hub| dev.syspath() == hub) => {
                 info!("Hub device detached. Stopping container.");
                 let _ = container.kill(Signal::KILL).await;
                 container.wait().await?;

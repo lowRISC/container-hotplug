@@ -28,10 +28,10 @@ pub struct HotPlug {
 impl HotPlug {
     pub fn new(
         container: Arc<Container>,
-        hub_path: PathBuf,
+        hub_path: Vec<PathBuf>,
         symlinks: Vec<cli::Symlink>,
     ) -> Result<Self> {
-        let monitor = DeviceMonitor::new(hub_path.clone())?;
+        let monitor = DeviceMonitor::new(hub_path)?;
         let devices = Default::default();
 
         let udev_sender = UdevSender::new(crate::util::namespace::NetNamespace::of_pid(

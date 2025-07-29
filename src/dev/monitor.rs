@@ -21,8 +21,8 @@ pub enum DeviceEvent {
 }
 
 pub struct DeviceMonitor {
-    /// Root path for devices to monitor. This is usually a USB hub.
-    root: PathBuf,
+    /// Root paths for devices to monitor. This is usually a USB hub.
+    roots: Vec<PathBuf>,
     /// Udev monitor socket.
     // Use `Rc` to avoid lifecycle issues in async stream impl.
     socket: Rc<AsyncFd<udev::MonitorSocket>>,
@@ -38,7 +38,7 @@ impl DeviceMonitor {
     /// Create a new device monitor.
     ///
     /// Devices that are already plugged will each generate an `Add` event immediately.
-    pub fn new(root: PathBuf) -> Result<Self> {
+    pub fn new(roots: Vec<PathBuf>) -> Result<Self> {
         // Create a socket before enumerating devices to avoid missing events.
         let socket = Rc::new(AsyncFd::new(udev::MonitorBuilder::new()?.listen()?)?);
 
@@ -46,7 +46,7 @@ impl DeviceMonitor {
         let mut enumerator = Enumerator::new()?;
         let enumerated = enumerator
             .scan_devices()?
-            .filter(|device| device.syspath().starts_with(&root))
+            .filter(|device| roots.iter().any(|root| device.syspath().starts_with(root)))
             .map(Device::from_udev)
             .collect::<VecDeque<_>>();
 
@@ -56,7 +56,7 @@ impl DeviceMonitor {
         }
 
         Ok(Self {
-            root,
+            roots,
             socket,
             seen,
             enumerated,
@@ -74,7 +74,12 @@ impl DeviceMonitor {
             };
 
             match event.event_type() {
-                EventType::Add if event.syspath().starts_with(&self.root) => {
+                EventType::Add
+                    if self
+                        .roots
+                        .iter()
+                        .any(|root| event.syspath().starts_with(root)) =>
+                {
                     match self.seen.entry(event.syspath().to_owned()) {
                         Entry::Occupied(occupied) => {
                             log::info!("Device already seen: {}", occupied.key().display());

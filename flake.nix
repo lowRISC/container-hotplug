@@ -22,10 +22,12 @@
             nativeBuildInputs = with pkgs; [
               rustup
               pkg-config
-              bpf-linker
+              (bpf-linker.override {
+                llvmPackages_20 = llvmPackages_21;
+              })
 
               # For llvm-objdump
-              llvmPackages_20.bintools
+              llvmPackages_21.bintools
 
               # To aid testing
               runc

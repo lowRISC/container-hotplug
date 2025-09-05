@@ -10,6 +10,7 @@ use hotplug::{AttachedDevice, HotPlug};
 
 use std::fmt::Display;
 use std::fs::File;
+use std::io::{PipeWriter, Read};
 use std::mem::ManuallyDrop;
 use std::os::unix::process::CommandExt;
 use std::pin::pin;
@@ -21,8 +22,6 @@ use clap::Parser;
 use log::info;
 use runc::Container;
 use runc::cli::{CreateOptions, GlobalOptions};
-use rustix::fd::OwnedFd;
-use rustix::pipe::PipeFlags;
 use rustix::process::Signal;
 use tokio_stream::StreamExt;
 
@@ -53,7 +52,7 @@ impl Display for Event {
     }
 }
 
-async fn create(global: GlobalOptions, create: CreateOptions, notifier: OwnedFd) -> Result<()> {
+async fn create(global: GlobalOptions, create: CreateOptions, notifier: PipeWriter) -> Result<()> {
     let mut notifier = Some(notifier);
 
     let config = runc::config::Config::from_bundle(&create.bundle)?;
@@ -226,7 +225,7 @@ fn do_main() -> Result<()> {
     // However for early forking, we need to know whether a container is successfully created.
     // We do this by creating a pipe. The pipe can be closed by either the child process exiting,
     // or the child process closing it.
-    let (parent, child) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC)?;
+    let (mut parent, child) = std::io::pipe()?;
     match safe_fork::fork().expect("should still be single-threaded") {
         None => {
             drop(parent);
@@ -234,7 +233,7 @@ fn do_main() -> Result<()> {
         }
         Some(pid) => {
             drop(child);
-            if rustix::io::read(parent, &mut [0])? == 0 {
+            if parent.read(&mut [0])? == 0 {
                 // In this case, the child process exited before notifying us.
                 std::process::exit(pid.join()?.code().unwrap_or(1) as _);
             }

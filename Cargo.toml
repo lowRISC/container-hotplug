@@ -17,7 +17,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 udev = "0.9"
-rustix = { version = "1", features = ["fs", "stdio", "process", "thread", "pipe", "mount", "net"] }
+rustix = { version = "1", features = ["fs", "stdio", "process", "thread", "mount", "net"] }
 bitflags = "2"
 humantime = "2"
 serde = { version = "1", features = ["derive"] }

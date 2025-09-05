@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use aya::maps::{HashMap, MapData};
 use aya::programs::{CgroupAttachMode, CgroupDevice, Link};
 use std::ffi::OsStr;
@@ -23,87 +23,6 @@ bitflags::bitflags! {
     }
 }
 
-pub trait DeviceAccessController {
-    /// Set the permission for a specific device.
-    fn set_permission(
-        &mut self,
-        ty: DeviceType,
-        major: u32,
-        minor: u32,
-        access: Access,
-    ) -> Result<()>;
-}
-
-pub struct DeviceAccessControllerV1 {
-    cgroup: PathBuf,
-}
-
-impl DeviceAccessControllerV1 {
-    pub fn new(cgroup: &Path) -> Result<Self> {
-        ensure!(
-            cgroup.is_dir(),
-            "cgroup {} does not exist",
-            cgroup.display()
-        );
-
-        Ok(Self {
-            cgroup: cgroup.to_owned(),
-        })
-    }
-}
-
-impl DeviceAccessController for DeviceAccessControllerV1 {
-    fn set_permission(
-        &mut self,
-        ty: DeviceType,
-        major: u32,
-        minor: u32,
-        access: Access,
-    ) -> Result<()> {
-        let mut denied = String::with_capacity(3);
-        let mut allowed = String::with_capacity(3);
-
-        let ty = match ty {
-            DeviceType::Character => 'c',
-            DeviceType::Block => 'b',
-        };
-
-        if access.contains(Access::READ) {
-            allowed.push('r');
-        } else {
-            denied.push('r');
-        }
-
-        if access.contains(Access::WRITE) {
-            allowed.push('w');
-        } else {
-            denied.push('w');
-        }
-
-        if access.contains(Access::MKNOD) {
-            allowed.push('m');
-        } else {
-            denied.push('m');
-        }
-
-        if !denied.is_empty() {
-            std::fs::write(
-                self.cgroup.join("devices.deny"),
-                format!("{ty} {major}:{minor} {denied}"),
-            )?;
-        }
-
-        if !allowed.is_empty() {
-            std::fs::write(
-                self.cgroup.join("devices.allow"),
-                format!("{ty} {major}:{minor} {allowed}"),
-            )?;
-        }
-
-        Ok(())
-    }
-}
-
 #[repr(C)] // This is read as POD by the BPF program.
 #[derive(Clone, Copy)]
 struct Device {
@@ -115,12 +34,18 @@ struct Device {
 // SAFETY: Device is `repr(C)`` and has no padding.
 unsafe impl aya::Pod for Device {}
 
-pub struct DeviceAccessControllerV2 {
+pub struct DeviceAccessController {
     map: HashMap<MapData, Device, u32>,
     pin: PathBuf,
 }
 
-impl DeviceAccessControllerV2 {
+impl Drop for DeviceAccessController {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.pin);
+    }
+}
+
+impl DeviceAccessController {
     pub fn new(cgroup: &Path) -> Result<Self> {
         // cgroup is of form "/sys/fs/cgroup/system.slice/xxx-yyy.scope", and we can use
         // the last part as unique identifier.
@@ -174,16 +99,9 @@ impl DeviceAccessControllerV2 {
 
         Ok(Self { map, pin })
     }
-}
 
-impl Drop for DeviceAccessControllerV2 {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.pin);
-    }
-}
-
-impl DeviceAccessController for DeviceAccessControllerV2 {
-    fn set_permission(
+    /// Set the permission for a specific device.
+    pub fn set_permission(
         &mut self,
         ty: DeviceType,
         major: u32,

@@ -12,9 +12,7 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::Mutex;
 
-use crate::cgroup::{
-    Access, DeviceAccessController, DeviceAccessControllerV1, DeviceAccessControllerV2, DeviceType,
-};
+use crate::cgroup::{Access, DeviceAccessController, DeviceType};
 
 struct CgroupEventNotifier {
     file: AsyncFd<File>,
@@ -72,7 +70,7 @@ pub struct Container {
     gid: u32,
     pid: Pid,
     wait: tokio::sync::watch::Receiver<bool>,
-    cgroup_device_filter: Mutex<Box<dyn DeviceAccessController + Send>>,
+    cgroup_device_filter: Mutex<DeviceAccessController>,
 }
 
 impl Container {
@@ -105,12 +103,12 @@ impl Container {
             "/run/systemd/transient/{cgroup_name}.d/50-DevicePolicy.conf"
         ));
 
-        let cgroup_device_filter: Box<dyn DeviceAccessController + Send> =
-            if let Some(device_cgroup) = &state.cgroup_paths.devices {
-                Box::new(DeviceAccessControllerV1::new(device_cgroup)?)
-            } else {
-                Box::new(DeviceAccessControllerV2::new(&state.cgroup_paths.unified)?)
-            };
+        anyhow::ensure!(
+            state.cgroup_paths.devices.is_none(),
+            "cgroupv1 is no longer supported"
+        );
+
+        let cgroup_device_filter = DeviceAccessController::new(&state.cgroup_paths.unified)?;
 
         let container = Self {
             uid: config.process.user.uid,
@@ -211,7 +209,7 @@ impl Container {
                     // The old file might be a bind mount. Try umount it.
                     let _ = rustix::mount::unmount(file.path(), UnmountFlags::DETACH);
                 } else {
-                    anyhow::bail!("Unknown file present in /dev");
+                    bail!("Unknown file present in /dev");
                 }
             }
 

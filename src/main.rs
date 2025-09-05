@@ -227,8 +227,7 @@ fn do_main() -> Result<()> {
     // We do this by creating a pipe. The pipe can be closed by either the child process exiting,
     // or the child process closing it.
     let (parent, child) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC)?;
-    // SAFETY: forking is safe because we are single-threaded now.
-    match safe_fork::fork()? {
+    match safe_fork::fork().expect("should still be single-threaded") {
         None => {
             drop(parent);
             tokio::runtime::Runtime::new()?.block_on(create(args.global, create_options, child))?;

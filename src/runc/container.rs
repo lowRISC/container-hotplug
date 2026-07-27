@@ -3,10 +3,13 @@ use std::io::{BufRead, BufReader, Seek};
 use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 use rustix::fs::{FileType, Mode};
-use rustix::mount::{FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags, UnmountFlags};
+use rustix::mount::{
+    FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags, OpenTreeFlags, UnmountFlags,
+};
 use rustix::process::{Pid, Signal};
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
@@ -71,6 +74,9 @@ pub struct Container {
     pid: Pid,
     wait: tokio::sync::watch::Receiver<bool>,
     cgroup_device_filter: Mutex<DeviceAccessController>,
+    /// Whether we have already complained about sysfs not supporting idmapped mounts.
+    /// Used to warn once instead of once per device.
+    sysfs_idmap_warned: AtomicBool,
 }
 
 impl Container {
@@ -116,6 +122,7 @@ impl Container {
             pid: Pid::from_raw(state.init_process_pid.try_into()?).context("Invalid PID")?,
             wait: recv,
             cgroup_device_filter: Mutex::new(cgroup_device_filter),
+            sysfs_idmap_warned: AtomicBool::new(false),
         };
 
         container.remount_dev()?;
@@ -259,6 +266,74 @@ impl Container {
             std::os::unix::fs::chown(node, Some(ns.uid(self.uid)?), Some(ns.gid(self.gid)?))?;
             Ok(())
         })?
+    }
+
+    /// Give the container read-write access to a device's sysfs directory.
+    ///
+    /// sysfs is not namespaced (other than the `net` subsystem), so the directory is already
+    /// visible inside the container. However runc mounts `/sys` read-only, so writing to any
+    /// attribute is rejected. To allow writes for this device only, we clone the host's
+    /// (read-write) sysfs mount and overmount the device's directory with it.
+    ///
+    /// Note that a device's children appear as subdirectories of its sysfs directory, so binding
+    /// a hub also covers everything connected to it.
+    pub async fn bind_sysfs(&self, syspath: &Path) -> Result<()> {
+        let ns = crate::util::namespace::MntNamespace::of_pid(self.pid)?;
+
+        // Clone the mount while we're still in the initial mount namespace, where `/sys` is
+        // writable. The clone is detached and is attached by `move_mount` below.
+        let tree = rustix::mount::open_tree(
+            rustix::fs::CWD,
+            syspath,
+            OpenTreeFlags::OPEN_TREE_CLONE | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+        )
+        .with_context(|| format!("Cannot clone sysfs mount for {}", syspath.display()))?;
+
+        // The attributes are owned by the host root, so a container using a user namespace
+        // cannot write to them even through a read-write mount. Idmap the mount to fix up the
+        // ownership.
+        //
+        // sysfs does not support idmapped mounts (as of Linux 6.x it does not set
+        // `FS_ALLOW_IDMAP`, so this fails with `EINVAL`), but attempt it anyway so that we
+        // benefit if it gains support. Failure is not fatal: the mount is still read-write, it
+        // is only DAC that then stands in the way.
+        if ns.in_user_ns()
+            && let Err(err) = crate::util::namespace::idmap_mount(tree.as_fd(), ns.as_fd())
+            && !self.sysfs_idmap_warned.swap(true, Ordering::Relaxed)
+        {
+            log::warn!(
+                "Cannot idmap sysfs mount for {}: {err:#}. \
+                 Writing to sysfs attributes requires a container user that maps to host root.",
+                syspath.display()
+            );
+        }
+
+        ns.with(|| -> Result<()> {
+            // The mount point must already exist: we cannot create it, as the container's `/sys`
+            // is read-only (and it is absent altogether if the container has no `/sys` mounted).
+            if !syspath.is_dir() {
+                bail!("{} does not exist in the container", syspath.display());
+            }
+
+            rustix::mount::move_mount(
+                tree.as_fd(),
+                "",
+                rustix::fs::CWD,
+                syspath,
+                MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
+            )?;
+            Ok(())
+        })?
+        .with_context(|| format!("Cannot mount sysfs directory {}", syspath.display()))
+    }
+
+    /// Revert [`Container::bind_sysfs`].
+    pub async fn unbind_sysfs(&self, syspath: &Path) -> Result<()> {
+        crate::util::namespace::MntNamespace::of_pid(self.pid)?.with(|| {
+            // The device is usually gone by the time we get here, in which case the mount is
+            // already detached, so ignore errors.
+            let _ = rustix::mount::unmount(syspath, UnmountFlags::DETACH);
+        })
     }
 
     pub async fn symlink(&self, source: &Path, link: &Path) -> Result<()> {

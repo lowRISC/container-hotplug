@@ -31,7 +31,8 @@ This tool wraps `runc` with the additional hotplug feature, therefore it can be 
 many container managers/orchestrators such as Docker, Podman, and Kubernetes. You need to ensure `runc` is available in your `PATH`
 so `container-hotplug` can find it.
 
-It supports two annotations, `org.lowrisc.hotplug.devices` and `org.lowrisc.hotplug.symlinks`.
+It supports three annotations, `org.lowrisc.hotplug.devices`, `org.lowrisc.hotplug.symlinks`
+and `org.lowrisc.hotplug.sysfs`.
 
 For Docker, you can specify an alternative runtime by [changing /etc/docker/daemon.json](https://docs.docker.com/engine/alternative-runtimes/#youki):
 ```json
@@ -97,3 +98,32 @@ to docker/podman command line or
 org.lowrisc.hotplug.symlinks: usb:2b3e:c310:1=/dev/ttyACM_CW310_0,usb:2b3e:c310:3=/dev/ttyACM_CW310_1
 ```
 to k8s config.
+
+## Writable sysfs
+
+The device nodes are enough for `libusb` and for the `tty` interfaces, but some operations are
+performed by writing to sysfs attributes instead, e.g. `authorized`, `bConfigurationValue` or
+`power/control`. sysfs is not namespaced, so the device directories are already visible inside the
+container, but `/sys` is mounted read-only, so such writes are rejected.
+
+Adding `--annotation org.lowrisc.hotplug.sysfs=rw` (or `org.lowrisc.hotplug.sysfs: rw` for k8s)
+bind-mounts the sysfs directory of each attached device read-write inside the container, so
+`/sys/bus/usb/devices/<bus>-<ports>` and its `<bus>-<ports>:<config>.<interface>` subdirectories
+become writable. Only the devices under the specified root devices are affected; the rest of `/sys`
+stays read-only. The mounts are removed as devices are unplugged.
+
+This is opt-in because these attributes are host state, not a per-container view of it: a container
+writing to them affects the device as seen by the host and by every other container using it.
+
+Two limitations to be aware of:
+
+* Driver binding via `/sys/bus/usb/drivers/<driver>/{bind,unbind}` is not covered, since that is not
+  part of the device's own directory.
+* sysfs attributes are owned by the host's root user, so DAC still applies. This is fine for a
+  container whose user maps to the host's root user, which is the usual case. For a container using
+  a user namespace we try to
+  [idmap](https://docs.kernel.org/filesystems/idmappings.html)
+  the mount so that the container's root user owns the attributes, but sysfs does not currently
+  support idmapped mounts, so this fails with `EINVAL` and a warning is logged. Until sysfs gains
+  support, writable sysfs in a user namespaced container needs the attributes to be chowned on the
+  host, e.g. from a udev rule.

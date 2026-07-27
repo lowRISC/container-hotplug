@@ -1,12 +1,58 @@
 use std::fs::File;
 use std::ops::Deref;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use rustix::fs::{Gid, Uid};
 use rustix::process::Pid;
 use rustix::thread::{CapabilitiesSecureBits, LinkNameSpaceType, UnshareFlags};
+
+/// Make a detached mount idmapped with respect to a user namespace.
+///
+/// This makes files owned by UID/GID X on the host appear as owned by the ID that X maps to
+/// inside `user_ns`, which is what allows a container user to access them.
+///
+/// `mount` must be a detached mount (e.g. as returned by `open_tree` with `OPEN_TREE_CLONE`);
+/// an already attached mount cannot be idmapped.
+///
+/// Not all filesystems support idmapped mounts, in which case this fails with `EINVAL`.
+pub fn idmap_mount(mount: BorrowedFd, user_ns: BorrowedFd) -> Result<()> {
+    // `mount_setattr` is not wrapped by rustix, so use the raw syscall.
+    #[repr(C)]
+    struct MountAttr {
+        attr_set: u64,
+        attr_clr: u64,
+        propagation: u64,
+        userns_fd: u64,
+    }
+
+    const MOUNT_ATTR_IDMAP: u64 = 0x0010_0000;
+
+    let attr = MountAttr {
+        attr_set: MOUNT_ATTR_IDMAP,
+        attr_clr: 0,
+        propagation: 0,
+        userns_fd: user_ns.as_raw_fd() as u64,
+    };
+
+    // SAFETY: `attr` is a valid `struct mount_attr` of the size we pass, and the path is an
+    // empty C string used with `AT_EMPTY_PATH` to refer to `mount` itself.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            mount.as_raw_fd(),
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            &attr as *const MountAttr,
+            std::mem::size_of::<MountAttr>(),
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error()).context("mount_setattr failed");
+    }
+    Ok(())
+}
 
 pub struct IdMap {
     map: Vec<(u32, u32, u32)>,
@@ -40,16 +86,27 @@ impl IdMap {
 }
 
 pub struct UserNamespace {
+    user_fd: File,
     uid_map: IdMap,
     gid_map: IdMap,
 }
 
 impl UserNamespace {
-    /// Open the mount namespace of a process.
+    /// Open the user namespace of a process.
     pub fn of_pid(pid: Pid) -> Result<Self> {
+        let user_fd = File::open(format!("/proc/{}/ns/user", pid.as_raw_nonzero()))?;
         let uid_map = IdMap::read(format!("/proc/{}/uid_map", pid.as_raw_nonzero()).as_ref())?;
         let gid_map = IdMap::read(format!("/proc/{}/gid_map", pid.as_raw_nonzero()).as_ref())?;
-        Ok(Self { uid_map, gid_map })
+        Ok(Self {
+            user_fd,
+            uid_map,
+            gid_map,
+        })
+    }
+
+    /// File descriptor referring to the user namespace.
+    pub fn as_fd(&self) -> BorrowedFd<'_> {
+        self.user_fd.as_fd()
     }
 
     /// Check if we're in an user namespace.

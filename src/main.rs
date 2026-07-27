@@ -76,6 +76,20 @@ async fn create(global: GlobalOptions, create: CreateOptions, notifier: PipeWrit
         }
     }
 
+    // Writable sysfs is opt-in: writes to sysfs attributes act on the host's device state, not
+    // just on the container's view of it.
+    let sysfs = match config
+        .annotations
+        .get("org.lowrisc.hotplug.sysfs")
+        .map(String::as_str)
+    {
+        None | Some("false" | "0" | "ro") => false,
+        Some("true" | "1" | "rw") => true,
+        Some(value) => bail!(
+            "Annotation `org.lowrisc.hotplug.sysfs` should be one of `rw` or `ro`, found `{value}`"
+        ),
+    };
+
     // Switch the logger to syslog. The runc logs are barely forwarded to the user or syslog by
     // container managers and orchestrators, while we do want to preserve the hotplug events.
     util::log::global_replace(Box::new(util::log::SyslogLogger::new()?));
@@ -108,7 +122,7 @@ async fn create(global: GlobalOptions, create: CreateOptions, notifier: PipeWrit
     rustix::stdio::dup2_stdout(&null)?;
     rustix::stdio::dup2_stderr(null)?;
 
-    let mut hotplug = HotPlug::new(Arc::clone(&container), devices.clone(), symlinks)?;
+    let mut hotplug = HotPlug::new(Arc::clone(&container), devices.clone(), symlinks, sysfs)?;
     let hotplug_stream = hotplug.run();
 
     let container_stream = {

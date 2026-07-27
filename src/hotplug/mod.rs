@@ -3,7 +3,7 @@ mod kobject_uevent;
 pub use attached_device::AttachedDevice;
 pub use kobject_uevent::UdevSender;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,8 +20,12 @@ use crate::runc::Container;
 pub struct HotPlug {
     pub container: Arc<Container>,
     symlinks: Vec<cli::Symlink>,
+    /// Whether the sysfs directory of attached devices should be made writable.
+    sysfs: bool,
     monitor: DeviceMonitor,
     devices: HashMap<PathBuf, AttachedDevice>,
+    /// Devices whose sysfs directory we have bind-mounted, so we know what to unmount.
+    sysfs_bound: HashSet<PathBuf>,
     udev_sender: UdevSender,
 }
 
@@ -30,6 +34,7 @@ impl HotPlug {
         container: Arc<Container>,
         hub_path: Vec<PathBuf>,
         symlinks: Vec<cli::Symlink>,
+        sysfs: bool,
     ) -> Result<Self> {
         let monitor = DeviceMonitor::new(hub_path)?;
         let devices = Default::default();
@@ -41,8 +46,10 @@ impl HotPlug {
         Ok(Self {
             container,
             symlinks,
+            sysfs,
             monitor,
             devices,
+            sysfs_bound: Default::default(),
             udev_sender,
         })
     }
@@ -88,9 +95,21 @@ impl HotPlug {
                     self.container.symlink(&devnode.path, symlink).await?;
                 }
 
+                let syspath = device.syspath().to_owned();
+
+                if self.sysfs {
+                    // Don't fail the attachment if this doesn't work; the device itself is
+                    // usable without writable sysfs attributes.
+                    match self.container.bind_sysfs(&syspath).await {
+                        Ok(()) => {
+                            self.sysfs_bound.insert(syspath.clone());
+                        }
+                        Err(err) => log::warn!("Cannot make sysfs writable: {err:#}"),
+                    }
+                }
+
                 self.udev_sender.send(device.udev(), "add")?;
 
-                let syspath = device.syspath().to_owned();
                 let device = AttachedDevice { device, symlinks };
                 self.devices.insert(syspath, device.clone());
 
@@ -100,6 +119,10 @@ impl HotPlug {
                 let Some(device) = self.devices.remove(device.syspath()) else {
                     return Ok(None);
                 };
+
+                if self.sysfs_bound.remove(device.syspath()) {
+                    self.container.unbind_sysfs(device.syspath()).await?;
+                }
 
                 let devnode = device.devnode().unwrap();
                 self.container

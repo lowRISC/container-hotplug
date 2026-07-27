@@ -1,3 +1,5 @@
+//! Manipulating a running container from the outside.
+
 use std::fs::{File, Permissions};
 use std::io::{BufRead, BufReader, Seek};
 use std::os::fd::AsFd;
@@ -17,11 +19,16 @@ use tokio::sync::Mutex;
 
 use crate::cgroup::{Access, DeviceAccessController, DeviceType};
 
+/// Watches a cgroup's `cgroup.events` file to detect when it becomes unpopulated.
+///
+/// The kernel signals changes to that file with `POLLPRI`, and reports `POLLERR` once the cgroup is
+/// deleted, so a single fd covers both "all processes exited" and "cgroup gone".
 struct CgroupEventNotifier {
     file: AsyncFd<File>,
 }
 
 impl CgroupEventNotifier {
+    /// Open the `cgroup.events` file of `cgroup`.
     fn new(cgroup: &Path) -> Result<Self> {
         let file = AsyncFd::with_interest(
             File::open(cgroup.join("cgroup.events")).context("Cannot open cgroup.events")?,
@@ -30,6 +37,10 @@ impl CgroupEventNotifier {
         Ok(Self { file })
     }
 
+    /// Whether the cgroup currently contains any process.
+    ///
+    /// A deleted cgroup counts as unpopulated, so a container that has been torn down does not
+    /// leave us waiting forever.
     fn populated(&mut self) -> Result<bool> {
         let file = self.file.get_mut();
         let Ok(_) = file.seek(std::io::SeekFrom::Start(0)) else {
@@ -48,6 +59,7 @@ impl CgroupEventNotifier {
         bail!("Cannot find populated field");
     }
 
+    /// Wait until the cgroup is no longer populated. Returns immediately if it already is not.
     pub async fn wait(&mut self) -> Result<()> {
         if !self.populated()? {
             return Ok(());
@@ -66,12 +78,24 @@ impl CgroupEventNotifier {
     }
 }
 
+/// A handle on a container that `runc` has created.
+///
+/// The methods here are the operations [`crate::hotplug::HotPlug`] needs: granting and revoking
+/// device access via the cgroup filter, and creating and removing device nodes, symlinks and sysfs
+/// mounts inside the container's namespaces. Everything that touches the container's filesystem runs
+/// on a throwaway thread that has entered its mount namespace, via
+/// [`MntNamespace::with`](crate::util::namespace::MntNamespace::with).
+///
+/// Dropping this detaches the device filter's pin, so it should be kept alive for as long as the
+/// container is running.
 pub struct Container {
     // Uid and gid of the primary container user.
     // Note that they're inside the user namespace (if any).
     uid: u32,
     gid: u32,
+    /// PID of the container's init process on the host, used to reach its namespaces.
     pid: Pid,
+    /// Set once the container's cgroup becomes unpopulated. See [`Container::wait`].
     wait: tokio::sync::watch::Receiver<bool>,
     cgroup_device_filter: Mutex<DeviceAccessController>,
     /// Whether we have already complained about sysfs not supporting idmapped mounts.
@@ -80,6 +104,19 @@ pub struct Container {
 }
 
 impl Container {
+    /// Take control of the container described by `config` and `state`.
+    ///
+    /// This has side effects on the live container, so it must be called after `runc create` has
+    /// returned and before the container is started:
+    ///
+    /// * device filtering is taken over from the container manager
+    ///   ([`DeviceAccessController::new`]), including deleting systemd's transient `DeviceAllow`
+    ///   drop-ins, which systemd would otherwise reconcile back on a `daemon-reload` and undo our
+    ///   filter;
+    /// * a watcher is spawned for the container's cgroup, backing [`Container::wait`];
+    /// * `/dev` is remounted if the container uses a user namespace ([`Container::remount_dev`]).
+    ///
+    /// Fails if the container is on cgroup v1, which is no longer supported.
     pub fn new(config: &super::config::Config, state: &super::state::State) -> Result<Self> {
         let (send, recv) = tokio::sync::watch::channel(false);
         let mut notifier = CgroupEventNotifier::new(&state.cgroup_paths.unified)?;
@@ -130,6 +167,7 @@ impl Container {
         Ok(container)
     }
 
+    /// PID of the container's init process, on the host.
     pub fn pid(&self) -> Pid {
         self.pid
     }
@@ -140,6 +178,13 @@ impl Container {
     /// and will automatically gain SB_I_NODEV flag as a kernel security measure.
     ///
     /// This is doing no favour for us because that flag will cause device node within it to be unopenable.
+    ///
+    /// The replacement is a fresh tmpfs created in the initial namespace, into which everything from
+    /// the old `/dev` is moved: submounts (`pts`, `shm`, `mqueue`, and the bind-mounted `console`)
+    /// are moved across, symlinks recreated, and device nodes re-`mknod`ed. It is owned by the
+    /// container's root user, so the container can create entries under it.
+    ///
+    /// Does nothing if the container does not use a user namespace.
     fn remount_dev(&self) -> Result<()> {
         let ns = crate::util::namespace::MntNamespace::of_pid(self.pid)?;
         if !ns.in_user_ns() {
@@ -226,11 +271,16 @@ impl Container {
         Ok(())
     }
 
+    /// Send a signal to the container's init process.
     pub async fn kill(&self, signal: Signal) -> Result<()> {
         rustix::process::kill_process(self.pid, signal)?;
         Ok(())
     }
 
+    /// Wait until every process in the container's cgroup has exited.
+    ///
+    /// This is deliberately about the cgroup, not just the init process: it stays true once reached,
+    /// so it can be awaited repeatedly, and it does not race with `runc delete`.
     pub async fn wait(&self) -> Result<()> {
         self.wait
             .clone()
@@ -240,6 +290,14 @@ impl Container {
         Ok(())
     }
 
+    /// Create a device node inside the container.
+    ///
+    /// `node` is a path in the container's mount namespace — the same path the device has on the
+    /// host. Parent directories are created as needed and any existing file at `node` is replaced.
+    /// The node is mode `0644` and owned by the container's primary user, so an unprivileged
+    /// entrypoint can use it.
+    ///
+    /// Access is still governed by the cgroup filter, so pair this with [`Container::device`].
     pub async fn mknod(
         &self,
         node: &Path,
@@ -336,6 +394,9 @@ impl Container {
         })
     }
 
+    /// Create a symlink at `link` pointing to `source`, inside the container.
+    ///
+    /// Parent directories are created as needed and any existing file at `link` is replaced.
     pub async fn symlink(&self, source: &Path, link: &Path) -> Result<()> {
         crate::util::namespace::MntNamespace::of_pid(self.pid)?.with(|| {
             if let Some(parent) = link.parent() {
@@ -348,12 +409,21 @@ impl Container {
         })?
     }
 
+    /// Remove a file inside the container, used to undo [`Container::mknod`] and
+    /// [`Container::symlink`].
+    ///
+    /// A file that is already gone is not an error: the container is free to delete entries under
+    /// `/dev` itself.
     pub async fn rm(&self, node: &Path) -> Result<()> {
         crate::util::namespace::MntNamespace::of_pid(self.pid)?.with(|| {
             let _ = std::fs::remove_file(node);
         })
     }
 
+    /// Set the container's access to a device, by major/minor number.
+    ///
+    /// An empty `access` revokes it. See [`DeviceAccessController::set_permission`] for what this
+    /// does and does not affect.
     pub async fn device(
         &self,
         ty: DeviceType,

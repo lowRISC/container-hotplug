@@ -1,3 +1,5 @@
+//! Logging in the format `runc` itself uses.
+
 use std::io::{BufWriter, Write};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -5,6 +7,7 @@ use std::time::SystemTime;
 use log::{Level, Log};
 use serde::Serialize;
 
+/// One log record, with the field names logrus uses.
 #[derive(Serialize)]
 struct Message {
     level: &'static str,
@@ -23,11 +26,16 @@ fn map_log_level(level: Level) -> &'static str {
 }
 
 /// JSON logger compatible with logrus (the logging library used by runc and many go projects).
+///
+/// Used when we are invoked with `--log-format=json`, so that a container manager parsing `runc`'s
+/// log file can read our messages too. Every record is flushed immediately, since the process may
+/// `exec` or `fork` at any point.
 pub struct JsonLogger {
     target: Mutex<BufWriter<Box<dyn Write + Send>>>,
 }
 
 impl JsonLogger {
+    /// Log to `target`, typically the file named by `--log`.
     pub fn new(target: Box<dyn Write + Send>) -> Self {
         Self {
             target: Mutex::new(BufWriter::new(target)),

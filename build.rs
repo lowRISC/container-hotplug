@@ -1,3 +1,9 @@
+//! Builds the eBPF device filter program that gets embedded into the binary.
+//!
+//! `cgroup_device_filter` is excluded from the workspace and built for a different target, so it
+//! needs its own `cargo` invocation rather than being an ordinary dependency. `src/cgroup.rs` embeds
+//! the resulting object with `include_bytes_aligned!`.
+
 use anyhow::{Context, Result};
 
 fn main() -> Result<()> {

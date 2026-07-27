@@ -15,11 +15,23 @@ use udev::{Enumerator, EventType};
 
 use super::Device;
 
+/// A device appearing or disappearing below one of the monitored roots.
+///
+/// Each device produces at most one `Add` and, after that, at most one `Remove`; a device that was
+/// never reported as added is never reported as removed.
 pub enum DeviceEvent {
     Add(Device),
     Remove(Device),
 }
 
+/// A stream of [`DeviceEvent`]s for the devices below a set of root devices.
+///
+/// Implements [`tokio_stream::Stream`]; [`DeviceMonitor::try_read`] is available for draining the
+/// events that are ready without awaiting, which is how [`crate::hotplug::HotPlug`] distinguishes
+/// devices present at start-up from later ones.
+///
+/// The stream never ends: unplugging the root device itself is reported as an ordinary `Remove`, and
+/// deciding what that means is the caller's business.
 pub struct DeviceMonitor {
     /// Root paths for devices to monitor. This is usually a USB hub.
     roots: Vec<PathBuf>,
@@ -38,6 +50,9 @@ impl DeviceMonitor {
     /// Create a new device monitor.
     ///
     /// Devices that are already plugged will each generate an `Add` event immediately.
+    ///
+    /// `roots` are the syspaths of the root devices; a device is monitored if its syspath is, or is
+    /// below, one of them.
     pub fn new(roots: Vec<PathBuf>) -> Result<Self> {
         // Create a socket before enumerating devices to avoid missing events.
         let socket = Rc::new(AsyncFd::new(udev::MonitorBuilder::new()?.listen()?)?);
@@ -63,6 +78,11 @@ impl DeviceMonitor {
         })
     }
 
+    /// Take the next event if one is already available, without awaiting.
+    ///
+    /// Returns [`None`] once the initially enumerated devices are exhausted and the udev socket has
+    /// nothing pending. Events for devices outside the monitored roots are consumed and skipped, so
+    /// `None` does not mean the socket had no traffic at all.
     pub fn try_read(&mut self) -> Result<Option<DeviceEvent>> {
         if let Some(device) = self.enumerated.pop_front() {
             return Ok(Some(DeviceEvent::Add(device)));

@@ -1,3 +1,15 @@
+//! Entering a container's namespaces to act on its behalf.
+//!
+//! To create a device node or a mount that the container can see, we must be in its mount namespace;
+//! to send it a netlink message that it trusts, we must be in its network namespace with a
+//! credential it recognises. Both are one-way operations for the thread that performs them, so
+//! [`MntNamespace::with`] and [`NetNamespace::with`] run the work on a scoped thread that is then
+//! discarded, leaving the rest of the process where it was.
+//!
+//! When the container has a user namespace, IDs must additionally be translated through it, since
+//! the container's root is some other UID on the host. [`UserNamespace`] handles that, and is what
+//! both of the above namespaces build on.
+
 use std::fs::File;
 use std::ops::Deref;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
@@ -54,15 +66,19 @@ pub fn idmap_mount(mount: BorrowedFd, user_ns: BorrowedFd) -> Result<()> {
     Ok(())
 }
 
+/// A parsed `/proc/<pid>/{uid,gid}_map`.
 pub struct IdMap {
+    /// Ranges of `(id inside the namespace, id outside, length)`.
     map: Vec<(u32, u32, u32)>,
 }
 
 impl IdMap {
+    /// Read and parse a map file.
     fn read(path: &Path) -> Result<Self> {
         Self::parse(&std::fs::read_to_string(path)?)
     }
 
+    /// Parse the contents of a map file: one `inside outside count` triple per line.
     fn parse(content: &str) -> Result<Self> {
         let mut map = Vec::new();
         for line in content.lines() {
@@ -75,6 +91,9 @@ impl IdMap {
         Ok(Self { map })
     }
 
+    /// Translate an ID inside the namespace to the corresponding ID outside it.
+    ///
+    /// Returns [`None`] if the ID is not mapped.
     fn translate(&self, id: u32) -> Option<u32> {
         for &(inside, outside, count) in self.map.iter() {
             if (inside..inside.checked_add(count)?).contains(&id) {
@@ -85,6 +104,10 @@ impl IdMap {
     }
 }
 
+/// A process's user namespace, together with its ID mappings.
+///
+/// A container may well not have one, in which case the mappings are the identity and
+/// [`UserNamespace::in_user_ns`] is false.
 pub struct UserNamespace {
     user_fd: File,
     uid_map: IdMap,
@@ -110,16 +133,21 @@ impl UserNamespace {
     }
 
     /// Check if we're in an user namespace.
+    ///
+    /// Determined from the mappings rather than the namespace itself: a namespace that maps every ID
+    /// to itself is indistinguishable from none for our purposes.
     pub fn in_user_ns(&self) -> bool {
         !(self.uid_map.map == [(0, 0, u32::MAX)] && self.gid_map.map == [(0, 0, u32::MAX)])
     }
 
-    /// Translate user ID into a UID in the namespace.
+    /// Translate a UID inside the namespace to the corresponding UID on the host.
+    ///
+    /// So `uid(0)` is the host UID that the container's root user is mapped to.
     pub fn uid(&self, uid: u32) -> Result<u32> {
         self.uid_map.translate(uid).context("UID overflows")
     }
 
-    /// Translate group ID into a GID in the namespace.
+    /// Translate a GID inside the namespace to the corresponding GID on the host.
     pub fn gid(&self, gid: u32) -> Result<u32> {
         self.gid_map.translate(gid).context("GID overflows")
     }
@@ -153,6 +181,10 @@ impl UserNamespace {
     }
 }
 
+/// A process's mount namespace.
+///
+/// Derefs to the [`UserNamespace`] of the same process, since acting inside a mount namespace
+/// generally also needs its ID mappings.
 pub struct MntNamespace {
     mnt_fd: File,
     user_ns: UserNamespace,
@@ -197,7 +229,11 @@ impl MntNamespace {
         Ok(())
     }
 
-    /// Execute inside the mount namespace.
+    /// Execute `f` inside the mount namespace, as the container's root user.
+    ///
+    /// Paths seen by `f` are the container's, so `/dev/ttyACM0` means the container's device node,
+    /// not the host's. Errors from entering the namespace, and a panic in `f`, are reported as the
+    /// outer [`Err`]; `f`'s own result is returned as-is.
     pub fn with<T: Send, F: FnOnce() -> T + Send>(&self, f: F) -> Result<T> {
         // To avoid messing with rest of the process, we do everything in a new thread.
         // Use scoped thread to avoid 'static bound (we need to access fd).
@@ -213,6 +249,7 @@ impl MntNamespace {
     }
 }
 
+/// A process's network namespace.
 pub struct NetNamespace {
     net_fd: File,
     user_ns: UserNamespace,
@@ -242,7 +279,11 @@ impl NetNamespace {
         Ok(())
     }
 
-    /// Execute inside the mount namespace.
+    /// Execute `f` inside the network namespace, as the container's root user.
+    ///
+    /// Being the container's root user matters as much as the namespace itself here: it is what makes
+    /// libudev in the container accept the SCM credentials on messages we send. See
+    /// [`crate::hotplug::UdevSender`].
     pub fn with<T: Send, F: FnOnce() -> T + Send>(&self, f: F) -> Result<T> {
         // To avoid messing with rest of the process, we do everything in a new thread.
         // Use scoped thread to avoid 'static bound (we need to access fd).

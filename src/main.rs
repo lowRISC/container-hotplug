@@ -1,3 +1,48 @@
+//! A `runc` wrapper that hot-plugs devices into a container as they are (un)plugged on the host.
+//!
+//! # Why
+//!
+//! An OCI runtime can only give a container access to devices that exist when the container is
+//! created. A device plugged in later has a major/minor number allocated by the kernel at that
+//! point, so it cannot be named up front, and a wildcard cgroup rule would grant access to every
+//! device handled by the same driver.
+//!
+//! This program instead watches udev for devices appearing beneath a set of *root devices*
+//! (typically a USB hub) and grants the container access to exactly those devices as they appear,
+//! revoking it as they disappear.
+//!
+//! # Usage
+//!
+//! `container-hotplug` is a drop-in replacement for `runc`; it forwards every subcommand to the
+//! real `runc` (which must be on `PATH`) and only adds behaviour to `create`. Which devices to
+//! plug in is configured through OCI annotations, so it can be used with Docker, Podman and
+//! containerd by pointing them at this binary as an alternative runtime. See `README.md` for the
+//! per-container-manager configuration.
+//!
+//! The annotations, parsed in [`create`]:
+//!
+//! * `org.lowrisc.hotplug.devices` (required) — comma-separated list of root devices, each in the
+//!   syntax of [`cli::DeviceRef`]. The container gets access to these and all their descendants.
+//!   Unplugging a root device stops the container.
+//! * `org.lowrisc.hotplug.symlinks` (optional) — comma-separated list of [`cli::Symlink`]s, giving
+//!   matching devices a well-known path inside the container, like a udev `SYMLINK` rule would on
+//!   bare metal.
+//! * `org.lowrisc.hotplug.sysfs` (optional, `ro` by default) — set to `rw` to bind-mount each
+//!   attached device's sysfs directory writable inside the container. Opt-in because sysfs
+//!   attributes are host state shared with every other user of the device. See
+//!   [`runc::Container::bind_sysfs`].
+//!
+//! # Structure
+//!
+//! * [`runc`] — the `runc` interface: command line, OCI `config.json`, `libcontainer` `state.json`,
+//!   and [`runc::Container`], which manipulates a live container's cgroup and namespaces.
+//! * [`cgroup`] — the eBPF `cgroup/dev` program that decides per-device access.
+//! * [`dev`] — udev device enumeration and monitoring.
+//! * [`hotplug`] — [`hotplug::HotPlug`], which joins the two: it turns device events into cgroup,
+//!   `/dev` and sysfs changes inside the container.
+//! * [`cli`] — parsers for the device and symlink annotation syntax.
+//! * [`util`] — namespace entry, logging and string escaping helpers.
+
 mod cgroup;
 mod cli;
 mod dev;
@@ -25,11 +70,20 @@ use runc::cli::{CreateOptions, GlobalOptions};
 use rustix::process::Signal;
 use tokio_stream::StreamExt;
 
+/// Something that happened to the container we are supervising.
+///
+/// Produced by the streams merged in [`create`]: device events come from [`HotPlug::run`], and
+/// [`Event::Stopped`] from watching the container's cgroup.
 #[derive(Clone)]
 enum Event {
+    /// A device appeared and has been made available inside the container.
     Attach(AttachedDevice),
+    /// A device disappeared and its access has been revoked.
     Detach(AttachedDevice),
+    /// All devices present at start-up have been attached, so the container's entrypoint can be
+    /// allowed to run. Emitted exactly once, before any event for a subsequently plugged device.
     Initialized,
+    /// The container's cgroup is no longer populated, i.e. every process in it has exited.
     Stopped,
 }
 
@@ -52,6 +106,16 @@ impl Display for Event {
     }
 }
 
+/// Handle the `create` verb, then supervise the container until it stops.
+///
+/// This runs in the forked daemon process (see [`do_main`]). It reads the hotplug annotations from
+/// the bundle's `config.json`, delegates the actual container creation to `runc`, and then loops
+/// over hotplug and container events for the container's whole lifetime.
+///
+/// `notifier` is the write end of a pipe to the process that our caller (e.g. the containerd shim)
+/// is waiting on. A byte is written to it once [`Event::Initialized`] is seen, which is what lets
+/// the caller proceed to `runc start`; dropping it without writing signals failure. This ordering
+/// is what guarantees devices are present before the entrypoint runs.
 async fn create(global: GlobalOptions, create: CreateOptions, notifier: PipeWriter) -> Result<()> {
     let mut notifier = Some(notifier);
 
@@ -166,6 +230,13 @@ async fn create(global: GlobalOptions, create: CreateOptions, notifier: PipeWrit
     Ok(())
 }
 
+/// Install the initial logger, writing to stderr.
+///
+/// Our own messages are logged at `info` and above; everything else is off unless the `LOG`
+/// environment variable says otherwise (`LOG_STYLE` controls colouring). This logger is replaced
+/// later on: by [`runc::log::JsonLogger`] if `--log-format=json` was passed, and in the daemon
+/// process by [`util::log::SyslogLogger`], since nothing reads a `runc` log file after `create`
+/// returns.
 fn initialize_logger() {
     let log_env = env_logger::Env::default()
         .filter_or("LOG", "off")
@@ -179,24 +250,22 @@ fn initialize_logger() {
     util::log::global_replace(Box::new(logger));
 }
 
+/// Dispatch on the `runc` verb we were invoked with.
+///
+/// When a container is started, `runc` is executed multiple times with different verbs:
+///
+/// * `create`: create cgroup for the container
+/// * `start`: start the entrypoint
+/// * `kill`: kill the container (skipped if the container init exits cleanly)
+/// * `delete`: delete the cgroup
+///
+/// We want to ensure that the hotplug controller runs after the cgroup is created and lasts until
+/// the cgroup is deleted. So we start a daemon process when we receive the `create` verb.
+///
+/// To avoid having to communicate with the daemon process, the process itself monitors the state of
+/// the container and exits when the cgroup is removed. Therefore, we only need to intercept
+/// `create`, and the rest can be forwarded to `runc` directly.
 fn do_main() -> Result<()> {
-    // This program is a wrapper around runc.
-    //
-    // When a container is started, runc is executed multiple times with different verbs:
-    // * "create": create cgroup for the container
-    // * "start": start the entrypoint
-    // * "kill": kill the container (skipped if the container init exits cleanly)
-    // * "delete": delete the cgroup
-    //
-    // We want to ensure that hotplug controller runs after the cgroup is created and last
-    // until the cgroup is deleted. So we start a daemon process when we received the
-    // "create" verb.
-    //
-    // To avoid having to communicate with the daemon process, the process
-    // itself monitors the state of the container and exits when the cgroup is removed.
-    // Therefore, we only need to intercept "create" command, and the rest can be forwarded
-    // to runc directly.
-
     let args = runc::cli::Command::parse();
 
     initialize_logger();

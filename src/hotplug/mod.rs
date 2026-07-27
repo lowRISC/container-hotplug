@@ -1,3 +1,17 @@
+//! The hotplug controller: host device events applied to a running container.
+//!
+//! [`HotPlug`] joins [`crate::dev`] (what is plugged in) to [`crate::runc::Container`] (what the
+//! container can see). For each device appearing below one of the root devices it:
+//!
+//! 1. grants access in the container's cgroup device filter,
+//! 2. creates the device node, and any [symlinks](crate::cli::Symlink) matching it, inside the
+//!    container's mount namespace,
+//! 3. optionally bind-mounts the device's sysfs directory read-write, and
+//! 4. synthesises a udev event inside the container's network namespace, so libudev users in the
+//!    container notice the device — see [`UdevSender`].
+//!
+//! Each step is undone in reverse when the device goes away.
+
 mod attached_device;
 mod kobject_uevent;
 pub use attached_device::AttachedDevice;
@@ -17,12 +31,18 @@ use crate::cli;
 use crate::dev::{DeviceEvent, DeviceMonitor};
 use crate::runc::Container;
 
+/// Keeps a container's device access in sync with the host.
+///
+/// Create one with [`HotPlug::new`] and drive it with [`HotPlug::run`].
 pub struct HotPlug {
     pub container: Arc<Container>,
+    /// Symlink rules to apply to each attached device.
     symlinks: Vec<cli::Symlink>,
     /// Whether the sysfs directory of attached devices should be made writable.
     sysfs: bool,
     monitor: DeviceMonitor,
+    /// Devices currently attached, keyed by syspath, so a remove event can be matched back to what
+    /// we did on add.
     devices: HashMap<PathBuf, AttachedDevice>,
     /// Devices whose sysfs directory we have bind-mounted, so we know what to unmount.
     sysfs_bound: HashSet<PathBuf>,
@@ -30,6 +50,11 @@ pub struct HotPlug {
 }
 
 impl HotPlug {
+    /// Start monitoring for devices below `hub_path` on behalf of `container`.
+    ///
+    /// `hub_path` holds the syspaths of the root devices, as resolved from the
+    /// `org.lowrisc.hotplug.devices` annotation. Nothing is applied to the container until
+    /// [`HotPlug::run`] is polled.
     pub fn new(
         container: Arc<Container>,
         hub_path: Vec<PathBuf>,
@@ -54,6 +79,15 @@ impl HotPlug {
         })
     }
 
+    /// Apply device events to the container, as a stream of the resulting [`Event`]s.
+    ///
+    /// Devices already present when the monitor was created are attached first, then
+    /// [`Event::Initialized`] is yielded to signal that the container's entrypoint may start. After
+    /// that the stream follows the host indefinitely, and only ends by returning an error.
+    ///
+    /// Devices without a device node yield no event, and an error attaching a device aborts the
+    /// stream — except a failure to make sysfs writable, which is only logged, since the device
+    /// itself is still usable.
     pub fn run(&mut self) -> impl tokio_stream::Stream<Item = Result<Event>> + '_ {
         try_stream! {
             while let Some(event) = self.monitor.try_read()? {
@@ -72,6 +106,10 @@ impl HotPlug {
         }
     }
 
+    /// Attach or detach a single device, returning the event to report.
+    ///
+    /// Returns [`None`] for devices we do not act on: those without a device node, and remove events
+    /// for devices that were never attached.
     async fn process(&mut self, event: DeviceEvent) -> Result<Option<Event>> {
         match event {
             DeviceEvent::Add(device) => {

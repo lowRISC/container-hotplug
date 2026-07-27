@@ -1,3 +1,16 @@
+//! The cgroup device filter program that `container-hotplug` attaches to a container's cgroup.
+//!
+//! This is a separate crate because it is compiled for the `bpfel-unknown-none` target; the parent
+//! crate's `build.rs` builds it and embeds the result in the binary.
+//!
+//! On cgroup v2 the kernel calls a `BPF_PROG_TYPE_CGROUP_DEVICE` program whenever a process in the
+//! cgroup opens a device node, and takes a non-zero return as permission granted. Rather than encode
+//! the rules in the program — which would mean reloading it on every change — this program always
+//! allows the [OCI default devices] and looks anything else up in the [`DEVICE_PERM`] map, which
+//! user space updates as devices come and go. See `crate::cgroup` on the other side.
+//!
+//! [OCI default devices]: https://github.com/opencontainers/runtime-spec/blob/main/config-linux.md
+
 #![no_std]
 #![no_main]
 
@@ -8,6 +21,9 @@ use aya_ebpf::macros::{cgroup_device, map};
 use aya_ebpf::maps::HashMap;
 use aya_ebpf::programs::DeviceContext;
 
+/// Key of [`DEVICE_PERM`], identifying one device node.
+///
+/// Must stay layout-compatible with the `Device` struct on the user-space side.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Device {
@@ -69,8 +85,15 @@ const DEV_PTMX: Device = Device {
 /// Hashmap storing a device -> permission mapping.
 ///
 /// This is modified from user-space to change permission.
+///
+/// The value is a bitmask of `BPF_DEVCG_ACC_*` access bits. A missing entry falls back to the entry
+/// for major 0, minor 0 of the same device type, if there is one, which acts as a default for all
+/// devices of that type; failing that, access is denied.
 static DEVICE_PERM: HashMap<Device, u32> = HashMap::with_max_entries(256, BPF_F_NO_PREALLOC);
 
+/// Decide whether an attempted device access is permitted.
+///
+/// Returns 1 to allow and 0 to deny, as the kernel expects.
 #[cgroup_device]
 fn check_device(ctx: DeviceContext) -> i32 {
     // SAFETY: This is a POD supplied by the kernel.

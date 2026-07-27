@@ -1,3 +1,5 @@
+//! Symlink rules, as used by the `org.lowrisc.hotplug.symlinks` annotation.
+
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -5,18 +7,38 @@ use anyhow::{Error, Result, bail, ensure};
 
 use crate::dev::Device;
 
+/// Which devices a [`Symlink`] rule applies to.
 #[derive(Clone)]
 pub enum SymlinkDevice {
+    /// A specific interface of a USB device, written `usb:<VID>:<PID>:<INTERFACE>`.
+    ///
+    /// The IDs are 4-digit hex and the interface is a decimal number; all three are required, since
+    /// a symlink names a single device node. Matching a single interface rather than the whole
+    /// device is what makes this useful for composite devices: a board exposing two CDC-ACM
+    /// interfaces gets a stable name for each, regardless of the order the kernel enumerated them
+    /// in.
     Usb {
         vid: String,
         pid: String,
+        /// Interface number, zero-padded to two digits to match udev's
+        /// `ID_USB_INTERFACE_NUM` property.
         if_num: String,
     },
 }
 
+/// A rule requesting a symlink to a device's node inside the container.
+///
+/// The syntax is `<PREFIX>:<DEVICE>=<PATH>`, e.g. `usb:2b3e:c310:1=/dev/ttyACM_CW310_0`, where
+/// `PATH` is an absolute path inside the container.
+///
+/// This is the container equivalent of a `SYMLINK` directive in a udev rule: the container gets a
+/// predictable path for a device whose kernel-assigned node name (`/dev/ttyACM3`, say) depends on
+/// what else is plugged in. The symlink is created when the device is attached and removed when it
+/// is unplugged; see [`crate::hotplug::HotPlug`].
 #[derive(Clone)]
 pub struct Symlink {
     device: SymlinkDevice,
+    /// Where the symlink is created, inside the container's mount namespace.
     path: PathBuf,
 }
 
@@ -89,6 +111,8 @@ impl FromStr for Symlink {
 }
 
 impl SymlinkDevice {
+    /// Compare against the device's udev properties, returning [`None`] if any property needed for
+    /// the comparison is missing or not UTF-8 (i.e. the device cannot match).
     fn matches_impl(&self, device: &udev::Device) -> Option<bool> {
         let matches = match self {
             SymlinkDevice::Usb { vid, pid, if_num } => {
@@ -100,12 +124,14 @@ impl SymlinkDevice {
         Some(matches)
     }
 
+    /// Whether this rule applies to `device`.
     pub fn matches(&self, device: &Device) -> bool {
         self.matches_impl(device.udev()).unwrap_or(false)
     }
 }
 
 impl Symlink {
+    /// The path to symlink, if this rule applies to `device`.
     pub fn matches(&self, device: &Device) -> Option<PathBuf> {
         if self.device.matches(device) {
             Some(self.path.clone())

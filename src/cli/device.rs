@@ -1,3 +1,5 @@
+//! Root device references, as used by the `org.lowrisc.hotplug.devices` annotation.
+
 use std::fmt::Display;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -8,20 +10,48 @@ use udev::Enumerator;
 use crate::dev::Device;
 
 /// A reference to a device.
+///
+/// The syntax is `[parent-of:]*<PREFIX>:<DEVICE>`, where the prefix selects one of the
+/// [`DeviceKind`] forms and each `parent-of:` walks one step up the sysfs hierarchy from whatever
+/// was matched. For example:
+///
+/// * `usb:2b3e:c310` — the device with that vendor and product ID.
+/// * `parent-of:usb:2b3e:c310` — its parent, typically the hub it is plugged into. This is the
+///   useful form for a root device: it gives the container everything on the same hub as a known
+///   board, without having to identify the hub itself.
+/// * `syspath:/sys/bus/usb/devices/usb1` — a device named by its sysfs directory.
+/// * `devnode:/dev/ttyACM0` — a device named by one of its device nodes.
+///
+/// Resolution happens once, at container creation time, in [`DeviceRef::device`]; the reference is
+/// not re-evaluated if devices are plugged in later.
 #[derive(Clone)]
 pub struct DeviceRef {
+    /// How many `parent-of:` prefixes were given.
     parent_level: usize,
     kind: DeviceKind,
 }
 
+/// How a device is identified, before any `parent-of:` is applied.
 #[derive(Clone)]
 pub enum DeviceKind {
+    /// A USB device matched on its `idVendor`, `idProduct` and `serial` attributes.
+    ///
+    /// Written `usb:<VID>[:<PID>[:<SERIAL>]]`, with the IDs as 4-digit hex. Omitted components are
+    /// not constrained, so `usb:2b3e` matches any device from that vendor. If several devices match,
+    /// which one is used is unspecified.
     Usb {
         vid: String,
         pid: Option<String>,
         serial: Option<String>,
     },
+    /// A device named by its sysfs directory, e.g. `syspath:/sys/bus/usb/devices/usb1`.
+    ///
+    /// The path must be absolute and under `/sys`; symlinks are resolved.
     Syspath(PathBuf),
+    /// A device named by one of its device nodes, e.g. `devnode:/dev/ttyACM0`.
+    ///
+    /// The path must be absolute and under `/dev`; symlinks are resolved, so a udev-created alias
+    /// works too.
     Devnode(PathBuf),
 }
 
@@ -147,6 +177,9 @@ impl Display for DeviceRef {
 }
 
 impl DeviceKind {
+    /// Resolve to the matching device, ignoring any `parent-of:`.
+    ///
+    /// Fails if no device currently matches.
     fn device(&self) -> Result<Device> {
         let dev = match &self {
             DeviceKind::Usb { vid, pid, serial } => {
@@ -187,6 +220,9 @@ impl DeviceKind {
 }
 
 impl DeviceRef {
+    /// Resolve the reference against the devices currently present on the host.
+    ///
+    /// Fails if nothing matches, or if a `parent-of:` walks past the root of the device tree.
     pub fn device(&self) -> Result<Device> {
         let mut device = self.kind.device()?;
         for _ in 0..self.parent_level {

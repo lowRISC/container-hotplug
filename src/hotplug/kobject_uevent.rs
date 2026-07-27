@@ -1,3 +1,5 @@
+//! Synthesising udev events inside a container.
+
 use std::io::{IoSlice, Write};
 use std::os::fd::OwnedFd;
 
@@ -38,13 +40,21 @@ struct MonitorNetlinkHeader {
 /// This netlink socket is namespaced, so udevd-sent messages are not observed by the container.
 /// This sender takes the place of udevd and ensures that libudev users inside the container may
 /// see the device add/removal event after being processed by container-hotplug.
+///
+/// Sending after the device node exists — as [`crate::hotplug::HotPlug`] does — means a container
+/// process woken by the event finds the device usable, which is not guaranteed if it were to
+/// observe the host's events directly.
 pub struct UdevSender {
     socket: OwnedFd,
+    /// Monotonic sequence number for the `SEQNUM` property. Ours are independent of the host's.
     seq_num: u64,
+    /// The container's network namespace, which both owns the socket and provides the identity we
+    /// send under.
     ns: NetNamespace,
 }
 
 impl UdevSender {
+    /// Open a `kobject_uevent` netlink socket in the container's network namespace `ns`.
     pub fn new(ns: NetNamespace) -> Result<Self> {
         let socket = ns.with(|| {
             rustix::net::socket(
@@ -61,6 +71,10 @@ impl UdevSender {
         })
     }
 
+    /// Broadcast an event for `device` to libudev monitors inside the container.
+    ///
+    /// `event` is the `ACTION` value, i.e. `"add"` or `"remove"`. The device's udev properties are
+    /// forwarded as-is, apart from `ACTION` and `SEQNUM`, which we supply.
     pub fn send(&mut self, device: &udev::Device, event: &str) -> Result<()> {
         self.seq_num += 1;
 

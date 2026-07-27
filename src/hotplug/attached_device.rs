@@ -1,12 +1,20 @@
+//! A device as seen from inside the container.
+
 use std::fmt::{self, Display, Formatter};
 use std::ops::Deref;
 use std::path::PathBuf;
 
 use crate::dev::Device;
 
+/// A device that has been made available inside the container.
+///
+/// Derefs to the underlying [`Device`], and additionally records the symlinks that were created for
+/// it, both so they can be removed again on detach and so they show up in the log line for the
+/// device.
 #[derive(Clone)]
 pub struct AttachedDevice {
     pub(super) device: Device,
+    /// Paths inside the container symlinked to this device's node.
     pub(super) symlinks: Vec<PathBuf>,
 }
 

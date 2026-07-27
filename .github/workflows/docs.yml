@@ -1,0 +1,62 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow the GITHUB_TOKEN to deploy to GitHub Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment, skipping runs queued behind an in-progress one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # The dev shell pins the nightly toolchain, bpf-linker and libudev that
+      # `build.rs` needs, so `cargo doc` builds the eBPF crate the same way it
+      # does locally.
+      - name: Build documentation
+        run: nix develop --command cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # Rustdoc emits docs under a per-crate directory, so send the root at it.
+      - name: Add redirect to crate docs
+        run: echo '<meta http-equiv="refresh" content="0; url=container_hotplug/index.html">' > target/doc/index.html
+
+      - name: Remove lockfile
+        run: rm -f target/doc/.lock
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-22.04
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

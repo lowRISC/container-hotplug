@@ -180,12 +180,8 @@ impl Container {
 
                 if file.file_name() == "console" {
                     // `console` is special, it's a file but it should be bind-mounted.
-                    drop(
-                        std::fs::OpenOptions::new()
-                            .create(true)
-                            .write(true)
-                            .open(&new_path)?,
-                    );
+                    // Only an empty file is needed as the bind-mount target.
+                    drop(std::fs::File::create(&new_path)?);
                     rustix::mount::mount_move(file.path(), new_path)?;
                 } else if metadata.file_type().is_dir() {
                     // This is a mount point, e.g. pts, mqueue, shm.

@@ -54,17 +54,17 @@ impl UserNamespace {
 
     /// Check if we're in an user namespace.
     pub fn in_user_ns(&self) -> bool {
-        !(self.uid_map.map == &[(0, 0, u32::MAX)] && self.gid_map.map == &[(0, 0, u32::MAX)])
+        !(self.uid_map.map == [(0, 0, u32::MAX)] && self.gid_map.map == [(0, 0, u32::MAX)])
     }
 
     /// Translate user ID into a UID in the namespace.
     pub fn uid(&self, uid: u32) -> Result<u32> {
-        Ok(self.uid_map.translate(uid).context("UID overflows")?)
+        self.uid_map.translate(uid).context("UID overflows")
     }
 
     /// Translate group ID into a GID in the namespace.
     pub fn gid(&self, gid: u32) -> Result<u32> {
-        Ok(self.gid_map.translate(gid).context("GID overflows")?)
+        self.gid_map.translate(gid).context("GID overflows")
     }
 
     /// "Enter" the user namespace.
@@ -123,7 +123,9 @@ impl MntNamespace {
     pub fn enter(&self) -> Result<()> {
         // Unshare FS for this specific thread so we can switch to another namespace.
         // Not doing this will cause EINVAL when switching to namespaces.
-        rustix::thread::unshare(UnshareFlags::FS)?;
+        // SAFETY: The safety requirement only concerns `UnshareFlags::FILES`, which would
+        // detach this thread's file descriptor table; we only unshare the filesystem context.
+        unsafe { rustix::thread::unshare_unsafe(UnshareFlags::FS)? };
 
         // Switch this particular thread to the container's mount namespace.
         rustix::thread::move_into_link_name_space(

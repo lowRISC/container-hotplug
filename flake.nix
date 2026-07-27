@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -22,9 +22,8 @@
             nativeBuildInputs = with pkgs; [
               rustup
               pkg-config
-              (bpf-linker.override {
-                llvmPackages_20 = llvmPackages_21;
-              })
+              # Picks up LLVM from rustc.llvm (21.x) in nixpkgs 25.11
+              bpf-linker
 
               # For llvm-objdump
               llvmPackages_21.bintools

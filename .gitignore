@@ -1,3 +1,4 @@
 /target
 /cgroup_device_filter/target
 /ott
+/.direnv

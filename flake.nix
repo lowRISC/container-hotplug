@@ -4,32 +4,64 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    # 25.11 has no LLVM 22, which the pinned nightly needs (see below).
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = {
     nixpkgs,
+    nixpkgs-unstable,
     flake-utils,
+    rust-overlay,
     ...
   }:
     flake-utils.lib.eachDefaultSystem (
       system: let
-        pkgs = import nixpkgs {inherit system;};
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [rust-overlay.overlays.default];
+        };
+        unstable = import nixpkgs-unstable {inherit system;};
+
+        # The eBPF crate needs nightly (`build-std`), so use one nightly
+        # toolchain for the whole tree, as CI does. Which nightly is pinned by
+        # the rust-overlay input in flake.lock; bump it with
+        # `nix flake update rust-overlay`, keeping the LLVM below in step.
+        rustToolchain = pkgs.rust-bin.selectLatestNightlyWith (
+          toolchain:
+            toolchain.default.override {
+              extensions = ["rust-src"];
+            }
+        );
+
+        # bpf-linker must be built against the same LLVM major as the
+        # toolchain above, or it cannot read the bitcode rustc emits.
+        llvmPackages = unstable.llvmPackages_22;
+        bpf-linker = unstable.bpf-linker.override {
+          rustc = {
+            inherit llvmPackages;
+            inherit (llvmPackages) llvm;
+          };
+        };
       in {
         devShells = {
           default = pkgs.mkShell {
             buildInputs = with pkgs; [udev];
-            nativeBuildInputs = with pkgs; [
-              rustup
-              pkg-config
-              # Picks up LLVM from rustc.llvm (21.x) in nixpkgs 25.11
+            nativeBuildInputs = [
+              rustToolchain
+              pkgs.pkg-config
               bpf-linker
 
               # For llvm-objdump
-              llvmPackages_21.bintools
+              llvmPackages.bintools
 
               # To aid testing
-              runc
+              pkgs.runc
             ];
           };
         };

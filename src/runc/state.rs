@@ -14,7 +14,7 @@ pub struct CgroupPaths {
 /// runc `libcontainer` states.
 ///
 /// Only states that we need are implemented here.
-/// Ref: https://github.com/opencontainers/runc/blob/6a2813f16ad4e3be44903f6fb499c02837530ad5/libcontainer/container_linux.go#L52
+/// Ref: <https://github.com/opencontainers/runc/blob/6a2813f16ad4e3be44903f6fb499c02837530ad5/libcontainer/container_linux.go#L52>
 #[non_exhaustive]
 #[derive(Debug, Deserialize)]
 pub struct State {

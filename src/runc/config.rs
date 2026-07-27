@@ -20,7 +20,7 @@ pub struct Process {
 /// OCI config.
 ///
 /// Only config that we need are implemented here.
-/// Ref: https://github.com/opencontainers/runtime-spec/blob/main/config.md
+/// Ref: <https://github.com/opencontainers/runtime-spec/blob/main/config.md>
 #[non_exhaustive]
 #[derive(Debug, Deserialize)]
 pub struct Config {

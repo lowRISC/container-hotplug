@@ -20,6 +20,38 @@ use rustix::fs::{Gid, Uid};
 use rustix::process::Pid;
 use rustix::thread::{CapabilitiesSecureBits, LinkNameSpaceType, UnshareFlags};
 
+/// `struct mount_attr`, the argument of `mount_setattr(2)`.
+#[repr(C)]
+#[derive(Default)]
+struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
+}
+
+/// Apply `attr` to `mount` itself, which must be a mount fd (e.g. from `open_tree`).
+///
+/// `mount_setattr` is not wrapped by rustix, so this is the raw syscall.
+fn mount_setattr(mount: BorrowedFd, attr: &MountAttr) -> Result<()> {
+    // SAFETY: `attr` is a valid `struct mount_attr` of the size we pass, and the path is an
+    // empty C string used with `AT_EMPTY_PATH` to refer to `mount` itself.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            mount.as_raw_fd(),
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            attr as *const MountAttr,
+            std::mem::size_of::<MountAttr>(),
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error()).context("mount_setattr failed");
+    }
+    Ok(())
+}
+
 /// Make a detached mount idmapped with respect to a user namespace.
 ///
 /// This makes files owned by UID/GID X on the host appear as owned by the ID that X maps to
@@ -30,40 +62,38 @@ use rustix::thread::{CapabilitiesSecureBits, LinkNameSpaceType, UnshareFlags};
 ///
 /// Not all filesystems support idmapped mounts, in which case this fails with `EINVAL`.
 pub fn idmap_mount(mount: BorrowedFd, user_ns: BorrowedFd) -> Result<()> {
-    // `mount_setattr` is not wrapped by rustix, so use the raw syscall.
-    #[repr(C)]
-    struct MountAttr {
-        attr_set: u64,
-        attr_clr: u64,
-        propagation: u64,
-        userns_fd: u64,
-    }
-
     const MOUNT_ATTR_IDMAP: u64 = 0x0010_0000;
 
-    let attr = MountAttr {
-        attr_set: MOUNT_ATTR_IDMAP,
-        attr_clr: 0,
-        propagation: 0,
-        userns_fd: user_ns.as_raw_fd() as u64,
-    };
+    mount_setattr(
+        mount,
+        &MountAttr {
+            attr_set: MOUNT_ATTR_IDMAP,
+            userns_fd: user_ns.as_raw_fd() as u64,
+            ..Default::default()
+        },
+    )
+}
 
-    // SAFETY: `attr` is a valid `struct mount_attr` of the size we pass, and the path is an
-    // empty C string used with `AT_EMPTY_PATH` to refer to `mount` itself.
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_mount_setattr,
-            mount.as_raw_fd(),
-            c"".as_ptr(),
-            libc::AT_EMPTY_PATH,
-            &attr as *const MountAttr,
-            std::mem::size_of::<MountAttr>(),
-        )
-    };
-    if ret != 0 {
-        return Err(std::io::Error::last_os_error()).context("mount_setattr failed");
-    }
-    Ok(())
+/// Remove a mount from the propagation group it was cloned into.
+///
+/// `open_tree` with `OPEN_TREE_CLONE` is the new-mount-API equivalent of `mount --bind`, and
+/// cloning a *shared* mount makes the clone a peer of the source rather than a private mount.
+/// That is rarely what we want: any mount later made underneath the clone would then propagate
+/// to every peer, including back into the mount namespace we cloned from, where nothing is
+/// tracking it to clean it up.
+///
+/// Call this on the detached mount, before attaching it with `move_mount`.
+pub fn make_mount_private(mount: BorrowedFd) -> Result<()> {
+    // `MS_PRIVATE`, which `mount_setattr` takes in the `propagation` field.
+    const MS_PRIVATE: u64 = 1 << 18;
+
+    mount_setattr(
+        mount,
+        &MountAttr {
+            propagation: MS_PRIVATE,
+            ..Default::default()
+        },
+    )
 }
 
 /// A parsed `/proc/<pid>/{uid,gid}_map`.

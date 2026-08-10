@@ -347,6 +347,21 @@ impl Container {
         )
         .with_context(|| format!("Cannot clone sysfs mount for {}", syspath.display()))?;
 
+        // `/sys` is typically a shared mount (systemd makes `/` rshared at boot), and cloning a
+        // shared mount yields a peer of the source rather than a private mount. Since device
+        // syspaths nest inside each other, the clone for a device becomes the parent mount of
+        // the clones for its children, and each of those would propagate a copy to every peer of
+        // the group -- including the host's own `/sys`. Those copies outlive the container, so
+        // the host's mount table grows by roughly one entry per device per container start,
+        // until it reaches `fs.mount-max` and every further mount fails with `ENOSPC`.
+        //
+        // Detaching the clone from the peer group stops that. Nothing is lost by it: sysfs
+        // device directories are dentries within a single superblock rather than submounts, so
+        // nothing under `/sys/devices` relies on propagation to become visible.
+        crate::util::namespace::make_mount_private(tree.as_fd()).with_context(|| {
+            format!("Cannot make sysfs mount private for {}", syspath.display())
+        })?;
+
         // The attributes are owned by the host root, so a container using a user namespace
         // cannot write to them even through a read-write mount. Idmap the mount to fix up the
         // ownership.
